@@ -1,0 +1,123 @@
+# =============================================================================
+# Punto único de parametrización del pipeline de análisis de incidentes de IA
+# =============================================================================
+
+data:
+  source_path: "data/raw/oecd_aim.csv"
+  processed_path: "data/processed/incidents_processed.parquet"
+  schema_type: "OECD"          # Opciones: OECD, AIID, CUSTOM
+
+  # Mapeo de columnas del dataset fuente -> esquema interno del pipeline.
+  # Para adaptar a otro dataset, cambiar los valores (lado derecho).
+  column_mapping:
+    text_data: "summary"
+    event_date: "date"
+    geo_zone: "region"
+    tags_list: "principles"
+    harmtype: "harmtype"
+    industries: "industries"
+    harmed: "harmed"
+    harmlevel: "harmlevel"
+
+  # Columnas multivaluadas (almacenadas como strings que simulan listas)
+  multilabel_columns:
+    - "tags_list"
+    - "industries"
+    - "harmed"
+    - "harmlevel"
+    - "harmtype"
+
+filters:
+  year_range: [2014, 2023]
+  regions: ["North America", "Europe", "Asia"]
+
+nlp:
+  language: "english"
+  min_token_length: 3
+  custom_stopwords:
+    - "ai"
+    - "u"
+    - "system"
+    - "report"
+    - "new"
+    - "say"
+    - "use"
+    - "would"
+  normalization_map:
+    deepfakes: "deepfake"
+    chatbots: "chatbot"
+    warns: "warn"
+    using: "use"
+    used: "use"
+  mental_health_keywords:
+    - "mental health"
+    - "stress"
+    - "anxiety"
+    - "depression"
+    - "psychological"
+
+sentiment:
+  backend: "transformer"        # Opciones: transformer, openai, traditional_ml
+  model_name: "cardiffnlp/twitter-roberta-base-sentiment-latest"
+  batch_size: 32
+  openai_model: "gpt-4o-mini"   # Usado solo si backend=openai
+  thresholds:
+    high: 0.7                   # Score negativity >= 0.7 -> "Alta"
+    medium: 0.4                 # Score negativity >= 0.4 -> "Media"
+                                 # Score negativity <  0.4 -> "Baja"
+  evaluation:
+    enabled: false              # true = activar evaluación con anotaciones manuales
+    human_label_column: "human_label"
+
+analysis:
+  # Mapeo de roles analíticos -> nombres de columna en el DataFrame procesado.
+  # Para adaptar a otro dataset, cambiar los valores (lado derecho).
+  columns:
+    region: "geo_zone"
+    year: "year"
+    year_month: "year_month"
+    tags: "tags_list"
+    harm_type: "harmtype"
+    industries: "industries"
+    harmed: "harmed"
+    harm_level: "harmlevel"
+    sentiment_score: "sentiment_score"
+    mental_health_flag: "mental_health_flag"
+    tokens: "tokens"
+
+  exclude_values: ["Unknown"]
+  vulnerable_groups: ["Workers", "Children", "Minorities", "Women", "Migrants"]
+  harm_aggregations:
+    Health: ["Physical", "Psychological"]
+  harm_chronology_types: ["Physical", "Psychological"]
+  moving_average_windows: [3, 6, 12]
+  top_n_principles: 4
+  top_n_industries: 10
+  top_n_harmed: 10
+  harm_level_severity:
+    "Non-physical harm": 0
+    "Hazard": 1
+    "Injury": 2
+    "Death": 3
+
+# Wordclouds: lista de nubes de palabras a generar.
+# Cada entrada puede filtrar por cualquier columna del DataFrame.
+# Para columnas multivaluadas (listas), el filtro coincide si al menos
+# un valor del filtro aparece en la lista de la fila.
+wordclouds:
+  - name: "general"
+  - name: "north_america"
+    filters:
+      geo_zone: ["North America"]
+  - name: "europe_asia"
+    filters:
+      geo_zone: ["Europe", "Asia"]
+
+reporting:
+  pdf_library: "fpdf2"
+  report_title: "Analisis de Incidentes de IA - OECD AIM"
+  figures_dpi: 300
+  figures_dir: "outputs/figures"
+  reports_dir: "outputs/reports"
+
+random_state: 42
