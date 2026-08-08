@@ -16,6 +16,14 @@ env/
 .env
 .env.*
 
+# API keys — si ponés tu key en config/params.yaml (campo openai_api_key),
+# vaciala antes de hacer commit: openai_api_key: ""
+# Alternativamente usá la variable de entorno OPENAI_API_KEY
+
+# Generated data — no commitear, se regeneran ejecutando el pipeline
+data/processed/
+outputs/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -216,6 +216,10 @@ def build_analyzer(config: dict) -> SentimentAnalyzer:
             batch_size=sentiment_config.get("batch_size", 32),
         )
     if backend == "openai":
+        # Allow key from config as fallback to the OPENAI_API_KEY env variable
+        key_from_config = sentiment_config.get("openai_api_key", "")
+        if key_from_config and not os.environ.get("OPENAI_API_KEY"):
+            os.environ["OPENAI_API_KEY"] = key_from_config
         return OpenAISentiment(model_name=sentiment_config["openai_model"])
     if backend == "traditional_ml":
         return MLSentiment(random_state=config.get("random_state", 42))

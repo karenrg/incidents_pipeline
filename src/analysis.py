@@ -142,6 +142,8 @@ def harm_severity_index(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     harm_level = _col(config, "harm_level")
 
     def _max_severity(levels: object) -> float:
+        if isinstance(levels, str):
+            levels = [levels] if levels.strip() else []
         if not isinstance(levels, list) or not levels:
             return np.nan
         return max(severity_map.get(level, 0) for level in levels)

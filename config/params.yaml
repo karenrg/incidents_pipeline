@@ -3,29 +3,45 @@
 # =============================================================================
 
 data:
-  source_path: "data/raw/oecd_aim.csv"
+  # ── OECD AIM ──────────────────────────────────────────────────────────────
+  # source_path: "data/raw/oecd_aim.csv"
+  # processed_path: "data/processed/incidents_processed.parquet"
+  # schema_type: "OECD"
+  # column_mapping:
+  #   text_data: "summary"
+  #   event_date: "date"
+  #   geo_zone: "region"
+  #   tags_list: "principles"
+  #   harmtype: "harmtype"
+  #   industries: "industries"
+  #   harmed: "harmed"
+  #   harmlevel: "harmlevel"
+  # multilabel_columns:
+  #   - "tags_list"
+  #   - "industries"
+  #   - "harmed"
+  #   - "harmlevel"
+  #   - "harmtype"
+
+  # ── AIID ──────────────────────────────────────────────────────────────────
+  source_path: "data/raw/aiid_incidents.csv"
   processed_path: "data/processed/incidents_processed.parquet"
-  schema_type: "OECD"          # Opciones: OECD, AIID, CUSTOM
+  schema_type: "AIID"
 
   # Mapeo de columnas del dataset fuente -> esquema interno del pipeline.
-  # Para adaptar a otro dataset, cambiar los valores (lado derecho).
   column_mapping:
-    text_data: "summary"
+    text_data: "description"
     event_date: "date"
-    geo_zone: "region"
-    tags_list: "principles"
-    harmtype: "harmtype"
-    industries: "industries"
+    geo_zone: "Location Region"
+    tags_list: "Risk Domain"
+    harmtype: "Risk Subdomain"
+    industries: "Sector of Deployment"
     harmed: "harmed"
-    harmlevel: "harmlevel"
+    harmlevel: "AI Harm Level"
 
   # Columnas multivaluadas (almacenadas como strings que simulan listas)
   multilabel_columns:
-    - "tags_list"
-    - "industries"
-    - "harmed"
-    - "harmlevel"
-    - "harmtype"
+    - "industries"   # Sector of Deployment viene como lista: '["sector1", "sector2"]'
 
 filters:
   year_range: [2014, 2023]
@@ -57,10 +73,11 @@ nlp:
     - "psychological"
 
 sentiment:
-  backend: "transformer"        # Opciones: transformer, openai, traditional_ml
+  backend: "openai"        # Opciones: transformer, openai, traditional_ml
   model_name: "cardiffnlp/twitter-roberta-base-sentiment-latest"
   batch_size: 32
   openai_model: "gpt-4o-mini"   # Usado solo si backend=openai
+  openai_api_key: ""            # Pegá tu key aquí para uso local (no commitear al repo)
   thresholds:
     high: 0.7                   # Score negativity >= 0.7 -> "Alta"
     medium: 0.4                 # Score negativity >= 0.4 -> "Media"
@@ -85,20 +102,20 @@ analysis:
     mental_health_flag: "mental_health_flag"
     tokens: "tokens"
 
-  exclude_values: ["Unknown"]
-  vulnerable_groups: ["Workers", "Children", "Minorities", "Women", "Migrants"]
+  exclude_values: ["Unknown", "unclear", ""]
+  vulnerable_groups: ["Minors", "Women", "Women, Minority Groups", "Black People", "Patients"]
   harm_aggregations:
     Health: ["Physical", "Psychological"]
-  harm_chronology_types: ["Physical", "Psychological"]
+  harm_chronology_types: ["Lack of capability or robustness", "Unfair discrimination and misrepresentation"]
   moving_average_windows: [3, 6, 12]
-  top_n_principles: 4
+  top_n_principles: 6
   top_n_industries: 10
   top_n_harmed: 10
   harm_level_severity:
-    "Non-physical harm": 0
-    "Hazard": 1
-    "Injury": 2
-    "Death": 3
+    "none": 0
+    "AI tangible harm near-miss": 1
+    "AI tangible harm issue": 2
+    "AI tangible harm event": 3
 
 # Wordclouds: lista de nubes de palabras a generar.
 # Cada entrada puede filtrar por cualquier columna del DataFrame.
@@ -115,9 +132,11 @@ wordclouds:
 
 reporting:
   pdf_library: "fpdf2"
-  report_title: "Analisis de Incidentes de IA - OECD AIM"
+  report_title: "Analisis de Incidentes de IA - AIID"
+  data_source_label: "AI Incident Database (AIID)"
   figures_dpi: 300
   figures_dir: "outputs/figures"
   reports_dir: "outputs/reports"
+  show_data_tables: false   # true = incluir tablas de datos bajo cada gráfico
 
 random_state: 42
