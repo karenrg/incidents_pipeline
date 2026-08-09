@@ -217,7 +217,11 @@ def run_analysis(df: pd.DataFrame, config: dict) -> dict:
             orient="records"
         ),
         "harm_chronology": harm_chronology(df, config).reset_index().to_dict(orient="records"),
-        "negativity_by_principle": negativity_by_principle(df, config).to_dict(orient="records"),
+        "negativity_by_principle": (
+            negativity_by_principle(df, config).to_dict(orient="records")
+            if _col(config, "sentiment_score") in df.columns
+            else []
+        ),
         "harm_severity_index": harm_severity_index(df, config).to_dict(orient="records"),
         "mental_health_summary": mental_health_summary(df, config).to_dict(orient="records"),
         "top_tokens": top_tokens(df, config).to_dict(orient="records"),

@@ -1,23 +1,21 @@
-# Pipeline de Análisis de Incidentes de IA
+# Pipeline de Análisis de Datos
 
-Pipeline modular y reproducible para analizar datasets de incidentes de inteligencia artificial. A partir de un CSV, genera métricas descriptivas, visualizaciones y dos tipos de reporte: un PDF ejecutivo y un explorador HTML interactivo.
+Pipeline modular y reproducible para el análisis descriptivo de datasets estructurados. Fue diseñado para analizar incidentes de inteligencia artificial, pero su arquitectura basada en mapeo de columnas permite adaptarlo a cualquier dominio que comparta una estructura similar: eventos con texto, fecha, categoría y región.
 
-Desarrollado como parte de una tesis de maestría.
+Desarrollado como parte de una tesis de maestría en Ciencia de Datos.
 
 ---
 
 ## ¿Qué hace este pipeline?
 
-Dado un CSV con incidentes de IA, el pipeline:
+Dado un CSV, el pipeline:
 
-1. **Carga y valida** el dataset, adaptando los nombres de columna a un esquema interno.
+1. **Carga y valida** el dataset, adaptando los nombres de columna a un esquema interno configurable.
 2. **Preprocesa** los datos: limpia texto, parsea fechas, filtra por año y región.
-3. **Procesa lenguaje natural**: tokeniza, lematiza y detecta keywords temáticas (ej: salud mental).
-4. **Analiza sentimiento** (opcional): clasifica el texto de cada incidente como negativo alto, medio o bajo.
+3. **Procesa lenguaje natural**: tokeniza, lematiza y detecta keywords temáticas.
+4. **Analiza sentimiento** (opcional): clasifica el texto de cada registro como negativo alto, medio o bajo.
 5. **Calcula métricas** descriptivas: distribuciones, rankings, tendencias temporales, índice de severidad.
-6. **Genera reportes**:
-   - `executive_report.pdf` — reporte ejecutivo con gráficos en alta resolución.
-   - `interactive_report.html` — explorador interactivo con filtros, scatter plots, wordclouds y más.
+6. **Genera un reporte HTML interactivo** con explorador de columnas, filtros dinámicos, scatter plots, tabla cruzada y wordclouds.
 
 ---
 
@@ -27,9 +25,9 @@ Dado un CSV con incidentes de IA, el pipeline:
 
 1. Abrí [`pipeline_runner_colab.ipynb`](pipeline_runner_colab.ipynb) en Google Colab.
 2. Ejecutá la **Celda 1** (Setup). Colab se reinicia automáticamente — es normal.
-3. Editá la **Celda 2 (Configuración)** con la ruta de tu CSV y las columnas de tu dataset.
+3. Editá la **Celda 2 (Configuración)** con la ruta de tu CSV y el mapeo de columnas.
 4. Ejecutá el resto de las celdas en orden.
-5. Al final, la **Celda 13** descarga los reportes generados.
+5. La **Celda 12** descarga el reporte HTML y el JSON de métricas.
 
 > 💡 Para usar análisis de sentimiento con GPU: `Entorno de ejecución → Cambiar tipo de entorno → T4 GPU`
 
@@ -53,17 +51,17 @@ Luego editá `config/params.yaml` y ejecutá `pipeline_runner.ipynb`.
 
 ### Mínimo necesario
 
-Solo necesitás indicar la ruta de tu CSV y qué columna de tu dataset cumple cada rol:
+Solo necesitás indicar la ruta de tu CSV y qué columna cumple cada rol:
 
 ```yaml
 # config/params.yaml
 data:
   source_path: "data/raw/mi_dataset.csv"
   column_mapping:
-    text_data:  "descripcion"   # Texto principal del incidente
-    event_date: "fecha"         # Fecha del incidente
+    text_data:  "descripcion"   # Texto principal (requerido)
+    event_date: "fecha"         # Fecha (requerido)
     geo_zone:   "region"        # Región (opcional)
-    # ... resto de columnas son opcionales
+    # ... el resto son opcionales
 ```
 
 Con solo eso, el pipeline corre completo con valores por defecto para todo lo demás.
@@ -75,7 +73,7 @@ Desactivado por defecto. Para activarlo:
 ```yaml
 sentiment:
   enabled: true
-  backend: "openai"        # "openai", "transformer" o "traditional_ml"
+  backend: "openai"        # "openai" o "transformer"
   openai_model: "gpt-4o-mini"
   openai_api_key: ""       # O usá la variable de entorno OPENAI_API_KEY
 ```
@@ -83,13 +81,12 @@ sentiment:
 | Backend | Descripción | Requiere |
 |---------|-------------|----------|
 | `openai` | GPT-4o-mini vía API (más preciso) | API key de OpenAI |
-| `transformer` | Modelo HuggingFace (~500 MB de descarga) | Nada adicional |
-| `traditional_ml` | TF-IDF + SVM, sin descarga | Nada adicional |
+| `transformer` | Modelo de HuggingFace configurable (`model_name` en params.yaml). Default: `cardiffnlp/twitter-roberta-base-sentiment-latest` | Nada adicional |
 
 **Para configurar la API key de OpenAI:**
 
 ```bash
-# Opción recomendada: variable de entorno (no queda en el código)
+# Variable de entorno (recomendado — no queda en el código)
 export OPENAI_API_KEY="sk-proj-..."   # Linux/Mac
 set OPENAI_API_KEY=sk-proj-...        # Windows CMD
 ```
@@ -113,7 +110,6 @@ incidents-pipeline/
 │   ├── nlp.py                      # Tokenización, lematización, stopwords
 │   ├── sentiment.py                # Análisis de sentimiento (3 backends)
 │   ├── analysis.py                 # Cálculo de métricas descriptivas
-│   ├── visualization.py            # Gráficos PNG y reporte PDF
 │   └── html_report.py              # Reporte HTML interactivo
 │
 ├── data/
@@ -121,8 +117,7 @@ incidents-pipeline/
 │   └── processed/                  # Dataset procesado (generado automáticamente)
 │
 ├── outputs/
-│   ├── figures/                    # Gráficos PNG individuales (generados)
-│   └── reports/                    # PDF, HTML y metrics.json (generados)
+│   └── reports/                    # HTML y metrics.json (generados)
 │
 ├── tests/                          # Tests unitarios (pytest)
 │
@@ -140,24 +135,22 @@ incidents-pipeline/
 |---------|-------------|
 | `data/processed/incidents_processed.parquet` | Dataset enriquecido con columnas calculadas |
 | `outputs/reports/metrics.json` | Todas las métricas en formato JSON |
-| `outputs/reports/executive_report.pdf` | Reporte ejecutivo con metodología y gráficos |
-| `outputs/reports/interactive_report.html` | Explorador interactivo (abrir en el navegador) |
-| `outputs/figures/*.png` | Gráficos individuales en 300 DPI |
+| `outputs/reports/interactive_report.html` | Reporte interactivo (abrir en el navegador) |
 
 > Los directorios `data/processed/` y `outputs/` están en `.gitignore` porque son artefactos generados que se reproducen corriendo el pipeline.
 
 ---
 
-## Datasets compatibles
+## Datasets de referencia
 
-El pipeline funciona con cualquier CSV de incidentes de IA. Está probado con:
+El pipeline fue desarrollado y probado con datasets de incidentes de IA, pero puede adaptarse a cualquier CSV con estructura similar (texto, fecha, categoría, región). Datasets usados en el desarrollo:
 
 | Dataset | Fuente |
 |---------|--------|
-| AI Incident Database (AIID) | [incidentdatabase.ai](https://incidentdatabase.ai) |
 | OECD AI Incidents Monitor (AIM) | [oecd.ai](https://oecd.ai) |
+| AI Incident Database (AIID) | [incidentdatabase.ai](https://incidentdatabase.ai) |
 
-Para adaptarlo a otro dataset, solo cambiás el `column_mapping` en `params.yaml` (o en la celda de configuración del notebook Colab).
+Para adaptarlo a otro dataset, solo cambiás el `column_mapping` en `params.yaml`.
 
 ---
 
@@ -167,7 +160,7 @@ Para adaptarlo a otro dataset, solo cambiás el `column_mapping` en `params.yaml
 pytest
 ```
 
-Cubren ingestion (mapeo de columnas, validaciones), preprocesamiento (parseo de listas, fechas, filtros) y sentiment (clasificación por umbrales, backend traditional_ml).
+Cubren ingestion (mapeo de columnas, validaciones), preprocesamiento (parseo de listas, fechas, filtros) y sentiment (clasificación por umbrales).
 
 ---
 

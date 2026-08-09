@@ -6,7 +6,6 @@ import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -133,67 +132,6 @@ class OpenAISentiment(SentimentAnalyzer):
         return float(payload["negativity_score"])
 
 
-class MLSentiment(SentimentAnalyzer):
-    """Classic TF-IDF + SVM sentiment backend.
-
-    Bootstraps training labels with NLTK's VADER lexicon (negative vs.
-    non-negative) and fits a linear SVM on TF-IDF features, since no
-    human-labeled training set is provided by default.
-    """
-
-    def __init__(self, random_state: int) -> None:
-        """Prepare the VADER lexicon used to bootstrap pseudo-labels.
-
-        Args:
-            random_state: Seed for the underlying SVM classifier.
-        """
-        import nltk
-        from nltk.sentiment import SentimentIntensityAnalyzer
-
-        try:
-            nltk.data.find("sentiment/vader_lexicon")
-        except LookupError:
-            nltk.download("vader_lexicon", quiet=True)
-
-        self._vader = SentimentIntensityAnalyzer()
-        self._random_state = random_state
-
-    def score(self, texts: list[str]) -> list[float]:
-        """Fit a TF-IDF + SVM model on VADER pseudo-labels and score texts.
-
-        Args:
-            texts: List of raw text values to score.
-
-        Returns:
-            List of negativity scores: predicted probability of the
-            "negative" pseudo-class.
-        """
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.svm import SVC
-
-        cleaned = [text if isinstance(text, str) else "" for text in texts]
-        pseudo_labels = np.array(
-            [1 if self._vader.polarity_scores(t)["compound"] <= -0.05 else 0 for t in cleaned]
-        )
-
-        vectorizer = TfidfVectorizer(max_features=5000, ngram_range=(1, 2), min_df=1)
-        features = vectorizer.fit_transform(cleaned)
-
-        if len(set(pseudo_labels)) < 2:
-            logger.warning(
-                "Traditional ML sentiment: only one pseudo-label class present; "
-                "returning constant scores"
-            )
-            return [float(label) for label in pseudo_labels]
-
-        classifier = SVC(kernel="linear", probability=True, random_state=self._random_state)
-        classifier.fit(features, pseudo_labels)
-
-        probabilities = classifier.predict_proba(features)
-        negative_index = list(classifier.classes_).index(1)
-        return [float(row[negative_index]) for row in probabilities]
-
-
 def build_analyzer(config: dict) -> SentimentAnalyzer:
     """Instantiate the sentiment backend selected in the configuration.
 
@@ -221,10 +159,7 @@ def build_analyzer(config: dict) -> SentimentAnalyzer:
         if key_from_config and not os.environ.get("OPENAI_API_KEY"):
             os.environ["OPENAI_API_KEY"] = key_from_config
         return OpenAISentiment(model_name=sentiment_config["openai_model"])
-    if backend == "traditional_ml":
-        return MLSentiment(random_state=config.get("random_state", 42))
-
-    raise ValueError(f"Unknown sentiment backend: '{backend}'")
+    raise ValueError(f"Unknown sentiment backend: '{backend}'. Use 'openai' or 'transformer'.")
 
 
 def classify_sentiment(score: float, thresholds: dict) -> str:

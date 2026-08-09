@@ -115,16 +115,19 @@ def standardize_dates(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     df["year"] = df["event_date"].dt.year
     df["year_month"] = df["event_date"].dt.to_period("M")
 
-    year_min, year_max = config["filters"]["year_range"]
-    mask = df["year"].between(year_min, year_max)
+    year_range = config["filters"].get("year_range") or []
+    if len(year_range) == 2:
+        year_min, year_max = year_range
+        mask = df["year"].between(year_min, year_max)
+        n_dropped = int((~mask).sum())
+        if n_dropped:
+            logger.info(
+                "Dropping %d rows outside year range [%d, %d]", n_dropped, year_min, year_max
+            )
+        return df[mask].copy()
 
-    n_dropped = int((~mask).sum())
-    if n_dropped:
-        logger.info(
-            "Dropping %d rows outside year range [%d, %d]", n_dropped, year_min, year_max
-        )
-
-    return df[mask].copy()
+    logger.info("No year_range filter applied — keeping all %d rows", len(df))
+    return df.copy()
 
 
 def filter_regions(df: pd.DataFrame, config: dict) -> pd.DataFrame:
@@ -138,9 +141,16 @@ def filter_regions(df: pd.DataFrame, config: dict) -> pd.DataFrame:
         Filtered copy of ``df`` containing only rows whose ``geo_zone`` is
         in the configured region list.
     """
-    regions = config["filters"]["regions"]
-    mask = df["geo_zone"].isin(regions)
+    regions = config["filters"].get("regions") or []
+    if not regions:
+        logger.info("No regions filter applied — keeping all %d rows", len(df))
+        return df.copy()
 
+    if "geo_zone" not in df.columns:
+        logger.warning("geo_zone column not found — skipping region filter")
+        return df.copy()
+
+    mask = df["geo_zone"].isin(regions)
     n_dropped = int((~mask).sum())
     if n_dropped:
         logger.info("Dropping %d rows outside regions %s", n_dropped, regions)

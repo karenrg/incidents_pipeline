@@ -301,6 +301,23 @@ def _render_html(
   <!-- Summary KPI cards -->
   <section class="overview-grid" id="analysis-cards"></section>
 
+  <!-- Analysis filter bar -->
+  <section class="analysis-filter-bar" id="analysis-filter-bar">
+    <div class="af-group">
+      <span class="af-label" data-i18n="af_year_range">Rango de años</span>
+      <div class="af-year-inputs">
+        <input type="number" id="af-year-min" class="af-year-input" placeholder="Desde" onchange="applyAnalysisFilters()">
+        <span class="af-year-sep">—</span>
+        <input type="number" id="af-year-max" class="af-year-input" placeholder="Hasta" onchange="applyAnalysisFilters()">
+      </div>
+    </div>
+    <div class="af-group af-group-regions">
+      <span class="af-label" data-i18n="af_regions">Regiones</span>
+      <div id="af-regions" class="af-checkboxes"></div>
+    </div>
+    <button class="af-clear-btn" onclick="clearAnalysisFilters()" data-i18n="af_clear">Limpiar filtros</button>
+  </section>
+
   <!-- Pre-computed pipeline charts -->
   <section>
     <h2 class="section-title" data-i18n="section_pipeline">Resultados del pipeline</h2>
@@ -429,6 +446,8 @@ const LANGS = {{
     section_crosstab: 'Tabla cruzada', section_crosstab_hint: 'Seleccioná dos columnas categóricas para ver su co-ocurrencia.',
     crosstab_row: 'Filas', crosstab_col: 'Columnas',
     btn_generate: 'Generar', none_col: '(sin color)',
+    af_year_range: 'Rango de años', af_regions: 'Regiones', af_clear: 'Limpiar filtros',
+    af_active: 'Filtros activos',
   }},
   en: {{
     tab_eda: '🔍 Data Exploration',
@@ -479,6 +498,8 @@ const LANGS = {{
     section_crosstab: 'Cross-table', section_crosstab_hint: 'Select two categorical columns to see co-occurrence.',
     crosstab_row: 'Rows', crosstab_col: 'Columns',
     btn_generate: 'Generate', none_col: '(no color)',
+    af_year_range: 'Year range', af_regions: 'Regions', af_clear: 'Clear filters',
+    af_active: 'Active filters',
   }},
 }};
 let currentLang = 'es';
@@ -523,6 +544,7 @@ function showTab(id, btn) {{
   btn.classList.add('active');
   if (id === 'analysis') {{
     renderAnalysisCards();
+    initAnalysisFilters();
     renderMetricsCharts();
     renderDynamicCharts();
     initWcPanel();
@@ -857,6 +879,81 @@ function renderCrosstab() {{
 }}
 
 /* ════════════════════════════════════════════════════════════════════════
+   ANALYSIS — Filter bar (year range + region checkboxes)
+   ════════════════════════════════════════════════════════════════════════ */
+let ANALYSIS_FILTERS = {{ yearMin: null, yearMax: null, regions: [] }};
+
+function initAnalysisFilters() {{
+  // Populate year inputs with dataset range as placeholder
+  const allYears = (METRICS.regional_evolution || []).map(r => +r.year).filter(Boolean);
+  if (allYears.length) {{
+    const minY = Math.min(...allYears), maxY = Math.max(...allYears);
+    const minEl = document.getElementById('af-year-min');
+    const maxEl = document.getElementById('af-year-max');
+    minEl.min = minY; minEl.max = maxY; minEl.placeholder = minY;
+    maxEl.min = minY; maxEl.max = maxY; maxEl.placeholder = maxY;
+  }}
+
+  // Populate region checkboxes (only once)
+  const regBox = document.getElementById('af-regions');
+  if (regBox.children.length) return;
+  const allRegions = (METRICS.summary?.regions || []).slice().sort();
+  if (!allRegions.length) {{
+    regBox.closest('.af-group').style.display = 'none';
+    return;
+  }}
+  regBox.innerHTML = allRegions.map(r =>
+    `<label class="af-check-label">
+       <input type="checkbox" value="${{r}}" onchange="applyAnalysisFilters()"> ${{r}}
+     </label>`
+  ).join('');
+}}
+
+function applyAnalysisFilters() {{
+  const minEl = document.getElementById('af-year-min');
+  const maxEl = document.getElementById('af-year-max');
+  ANALYSIS_FILTERS.yearMin = minEl.value ? +minEl.value : null;
+  ANALYSIS_FILTERS.yearMax = maxEl.value ? +maxEl.value : null;
+  ANALYSIS_FILTERS.regions = [...document.querySelectorAll('#af-regions input:checked')].map(el => el.value);
+  // Invalidate cache and re-render
+  document.getElementById('metrics-charts').dataset.rendered = '';
+  renderMetricsCharts();
+}}
+
+function clearAnalysisFilters() {{
+  document.getElementById('af-year-min').value = '';
+  document.getElementById('af-year-max').value = '';
+  document.querySelectorAll('#af-regions input').forEach(el => el.checked = false);
+  ANALYSIS_FILTERS = {{ yearMin: null, yearMax: null, regions: [] }};
+  document.getElementById('metrics-charts').dataset.rendered = '';
+  renderMetricsCharts();
+}}
+
+/* ── Filter helpers ─────────────────────────────────────────────────── */
+// Filter an array of rows by year field
+function _afYears(rows, field) {{
+  const {{ yearMin, yearMax }} = ANALYSIS_FILTERS;
+  if (yearMin == null && yearMax == null) return rows;
+  field = field || 'year';
+  return rows.filter(r => {{
+    const y = +(String(r[field] || '').slice(0, 4));
+    return (!yearMin || y >= yearMin) && (!yearMax || y <= yearMax);
+  }});
+}}
+
+// From a list of column names, keep only those that match active regions
+function _afRegionCols(cols) {{
+  const {{ regions }} = ANALYSIS_FILTERS;
+  return regions.length ? cols.filter(c => regions.includes(c)) : cols;
+}}
+
+// Filter rows whose `field` value is in active regions
+function _afRegionRows(rows, field) {{
+  const {{ regions }} = ANALYSIS_FILTERS;
+  return regions.length ? rows.filter(r => regions.includes(String(r[field] || ''))) : rows;
+}}
+
+/* ════════════════════════════════════════════════════════════════════════
    ANALYSIS — Summary KPI cards  (only stable non-hardcoded cards)
    ════════════════════════════════════════════════════════════════════════ */
 function renderAnalysisCards() {{
@@ -924,9 +1021,13 @@ function renderMetricsCharts() {{
 
 /* ── Individual chart renderers (use METRICS, language-aware) ──────── */
 function chartRegionalEvolution(id) {{
-  const rows = METRICS.regional_evolution || [];
+  const raw = METRICS.regional_evolution || [];
+  if (!raw.length) {{ noDom(id); return; }}
+  const rows = _afYears(raw, 'year');
   if (!rows.length) {{ noDom(id); return; }}
-  const regions = Object.keys(rows[0]).filter(k => k !== 'year');
+  const allRegions = Object.keys(raw[0]).filter(k => k !== 'year');
+  const regions = _afRegionCols(allRegions);
+  if (!regions.length) {{ noDom(id); return; }}
   Plotly.newPlot(id, regions.map((rg,i) => ({{
     x: rows.map(r=>r.year), y: rows.map(r=>r[rg]||0), name: rg, type:'bar',
     marker:{{color: C[i%C.length]}},
@@ -940,7 +1041,7 @@ function chartRegionalEvolution(id) {{
 }}
 
 function chartCumulative(id) {{
-  const rows = METRICS.cumulative_concentration || [];
+  const rows = _afYears(METRICS.cumulative_concentration || [], 'year');
   if (!rows.length) {{ noDom(id); return; }}
   Plotly.newPlot(id, [{{
     x: rows.map(r=>r.year), y: rows.map(r=>r.cumulative_pct),
@@ -952,10 +1053,12 @@ function chartCumulative(id) {{
 }}
 
 function chartHarmTypes(id) {{
-  const rows = METRICS.harm_types_distribution || [];
+  const raw = METRICS.harm_types_distribution || [];
+  if (!raw.length) {{ noDom(id); return; }}
+  const regionKey = Object.keys(raw[0])[0];
+  const rows = _afRegionRows(raw, regionKey);
   if (!rows.length) {{ noDom(id); return; }}
-  const regionKey = Object.keys(rows[0])[0];
-  const hts   = Object.keys(rows[0]).filter(k => k !== regionKey);
+  const hts   = Object.keys(raw[0]).filter(k => k !== regionKey);
   const regs  = rows.map(r => String(r[regionKey]));
   const lgHt = legendBottom(hts.length, regs.length);
   const htEl = document.getElementById(id);
@@ -975,10 +1078,12 @@ function chartHarmTypes(id) {{
 }}
 
 function chartPrinciples(id) {{
-  const rows = METRICS.principles_distribution || [];
+  const raw = METRICS.principles_distribution || [];
+  if (!raw.length) {{ noDom(id); return; }}
+  const rk = Object.keys(raw[0])[0];
+  const rows = _afRegionRows(raw, rk);
   if (!rows.length) {{ noDom(id); return; }}
-  const rk = Object.keys(rows[0])[0];
-  const ps = Object.keys(rows[0]).filter(k=>k!==rk);
+  const ps = Object.keys(raw[0]).filter(k=>k!==rk);
   const sorted = ps.map(p=>[p, rows.reduce((s,r)=>s+(r[p]||0),0)]).sort((a,b)=>a[1]-b[1]);
   Plotly.newPlot(id, [{{
     x: sorted.map(([,v])=>v), y: sorted.map(([k])=>trunc(k,45)),
@@ -1000,10 +1105,12 @@ function chartIndustries(id) {{
 }}
 
 function chartStakeholders(id) {{
-  const rows = METRICS.stakeholders_distribution || [];
+  const raw = METRICS.stakeholders_distribution || [];
+  if (!raw.length) {{ noDom(id); return; }}
+  const rk = Object.keys(raw[0])[0];
+  const rows = _afRegionRows(raw, rk);
   if (!rows.length) {{ noDom(id); return; }}
-  const rk = Object.keys(rows[0])[0];
-  const gs = Object.keys(rows[0]).filter(k=>k!==rk);
+  const gs = Object.keys(raw[0]).filter(k=>k!==rk);
   const regs = rows.map(r=>String(r[rk]));
   const lgSt = legendBottom(gs.length, regs.length);
   const stEl = document.getElementById(id);
@@ -1032,9 +1139,9 @@ function chartVulnerable(id) {{
 }}
 
 function chartHarmChronology(id) {{
-  const rows = METRICS.harm_chronology || [];
+  const rows = _afYears(METRICS.harm_chronology || [], 'year');
   if (!rows.length) {{ noDom(id); return; }}
-  const hts = Object.keys(rows[0]).filter(k=>k!=='year');
+  const hts = Object.keys(METRICS.harm_chronology[0] || {{}}).filter(k=>k!=='year');
   Plotly.newPlot(id, hts.map((ht,i)=>({{
     x: rows.map(r=>r.year), y: rows.map(r=>r[ht]||0), name: trunc(ht,30),
     type:'scatter', mode:'lines+markers', line:{{color:C[i%C.length],width:2}}, marker:{{size:5}},
@@ -1048,7 +1155,7 @@ function chartHarmChronology(id) {{
 }}
 
 function chartSeverity(id) {{
-  const rows = METRICS.harm_severity_index || [];
+  const rows = _afYears(METRICS.harm_severity_index || [], 'year');
   if (!rows.length) {{ noDom(id); return; }}
   Plotly.newPlot(id, [{{
     x: rows.map(r=>r.year), y: rows.map(r=>r.avg_severity),
@@ -1060,7 +1167,7 @@ function chartSeverity(id) {{
 }}
 
 function chartMentalHealth(id) {{
-  const rows = METRICS.mental_health_summary || [];
+  const rows = _afYears(METRICS.mental_health_summary || [], 'year');
   if (!rows.length) {{ noDom(id); return; }}
   const mhNames = [t('incidents'), t('pct_total')];
   Plotly.newPlot(id, [
@@ -1081,9 +1188,9 @@ function chartMentalHealth(id) {{
 }}
 
 function chartNegativity(id) {{
-  const rows = METRICS.negativity_by_principle || [];
+  const rows = _afYears(METRICS.negativity_by_principle || [], 'year_month');
   if (!rows.length) {{ noDom(id); return; }}
-  const ps = Object.keys(rows[0]).filter(k=>k!=='year_month'&&!k.includes('__ma'));
+  const ps = Object.keys(METRICS.negativity_by_principle[0] || {{}}).filter(k=>k!=='year_month'&&!k.includes('__ma'));
   Plotly.newPlot(id, ps.map((p,i)=>({{
     x: rows.map(r=>r.year_month), y: rows.map(r=>r[p]??null),
     name: trunc(p,25), type:'scatter', mode:'lines', connectgaps:false,
@@ -1650,6 +1757,19 @@ section{margin-bottom:34px}
 .ds-row span{color:#888}
 
 .charts-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:16px}
+.analysis-filter-bar{display:flex;flex-wrap:wrap;align-items:flex-start;gap:20px;background:#f5f6fa;border:1px solid #e2e5f0;border-radius:10px;padding:14px 18px;margin-bottom:8px}
+.af-group{display:flex;flex-direction:column;gap:6px}
+.af-group-regions{flex:1;min-width:200px}
+.af-label{font-size:.78rem;font-weight:600;color:#4a5568;text-transform:uppercase;letter-spacing:.04em}
+.af-year-inputs{display:flex;align-items:center;gap:6px}
+.af-year-input{width:80px;padding:5px 8px;border:1.5px solid #d0d5e8;border-radius:7px;font-size:.85rem;color:#1a202c;background:#fff}
+.af-year-input:focus{outline:none;border-color:#4f8ef7}
+.af-year-sep{color:#aaa;font-size:.9rem}
+.af-checkboxes{display:flex;flex-wrap:wrap;gap:6px 14px;max-height:80px;overflow-y:auto}
+.af-check-label{display:flex;align-items:center;gap:4px;font-size:.8rem;color:#2d3748;cursor:pointer;white-space:nowrap}
+.af-check-label input{cursor:pointer;accent-color:#4f8ef7}
+.af-clear-btn{align-self:flex-end;padding:6px 14px;background:#fff;border:1.5px solid #d0d5e8;border-radius:20px;font-size:.78rem;color:#666;cursor:pointer;transition:all .15s;white-space:nowrap}
+.af-clear-btn:hover{border-color:#f74f6e;color:#f74f6e}
 .chart-card{background:#fff;border-radius:12px;padding:15px 17px;box-shadow:0 1px 6px rgba(0,0,0,.07)}
 .chart-card-tall{grid-column:span 2}
 .chart-title{font-size:.88rem;font-weight:600;color:#444;margin-bottom:9px}

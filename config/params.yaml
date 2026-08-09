@@ -12,7 +12,7 @@
 
 data:
   # Ruta al archivo CSV con los incidentes de IA
-  source_path: "data/raw/aiid_incidents.csv"
+  source_path: "data/raw/oecd_aim.csv"
 
   # Mapeo de columnas: qué columna de tu CSV cumple cada rol en el análisis.
   # - Lado izquierdo: rol interno del pipeline (no cambiar)
@@ -21,14 +21,14 @@ data:
   # Solo text_data y event_date son estrictamente necesarios.
   # El resto se puede dejar vacío ("") si tu dataset no lo tiene.
   column_mapping:
-    text_data:   "description"      # Texto principal del incidente (requerido)
-    event_date:  "date"             # Fecha del incidente (requerido)
-    geo_zone:    "Location Region"  # Región geográfica (opcional)
-    tags_list:   "Risk Domain"      # Categorías o principios (opcional)
-    harmtype:    "Risk Subdomain"   # Tipo de daño (opcional)
-    industries:  "Sector of Deployment"  # Industria o sector (opcional)
-    harmed:      "harmed"           # Grupos afectados (opcional)
-    harmlevel:   "AI Harm Level"    # Nivel de gravedad (opcional)
+    text_data:   "summary"      # Texto principal del incidente (requerido)
+    event_date:  "date"         # Fecha del incidente (requerido)
+    geo_zone:    "region"       # Región geográfica (opcional)
+    tags_list:   "principles"   # Categorías o etiquetas (opcional)
+    harmtype:    "harmtype"     # Tipo de daño (opcional)
+    industries:  "industries"   # Industria o sector (opcional)
+    harmed:      "harmed"       # Grupos afectados (opcional)
+    harmlevel:   "harmlevel"    # Nivel de gravedad (opcional)
 
   # Columnas que contienen listas de valores (ej: '["sector1", "sector2"]').
   # Dejá vacío si ninguna columna tiene este formato.
@@ -45,9 +45,9 @@ data:
 
 filters:
   # Rango de años a incluir en el análisis. null = sin límite.
-  year_range: [2014, 2023]
+  year_range: []
   # Regiones a incluir. Lista vacía [] = todas las regiones.
-  regions: ["North America", "Europe", "Asia"]
+  regions: []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -57,13 +57,12 @@ filters:
 # Requiere tiempo de cómputo extra. Activalo solo si lo necesitás.
 
 sentiment:
-  enabled: false   # Cambiá a true para activar el análisis de sentimiento
+  enabled: true   # Cambiá a true para activar el análisis de sentimiento
 
   # Modelo a usar. Elegí uno:
-  #   "transformer"    → Modelo de HuggingFace (no necesita API key, ~500 MB de descarga)
-  #   "openai"         → GPT-4o-mini de OpenAI (necesita API key, más rápido y preciso)
-  #   "traditional_ml" → TF-IDF + SVM, sin descarga ni API key (menos preciso)
-  backend: "openai"
+  #   "openai"      → GPT-4o-mini de OpenAI (necesita API key, más preciso)
+  #   "transformer" → Modelo de HuggingFace (no necesita API key, ~500 MB de descarga)
+  backend: "transformer"
 
   # Solo necesario si backend = "openai"
   openai_model:   "gpt-4o-mini"
@@ -176,20 +175,6 @@ analysis:
     "AI tangible harm event":      3
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NUBES DE PALABRAS — Wordclouds
-# ─────────────────────────────────────────────────────────────────────────────
-# Cada entrada genera una nube de palabras. Se puede filtrar por región u otra columna.
-
-wordclouds:
-  - name: "general"
-  - name: "north_america"
-    filters:
-      geo_zone: ["North America"]
-  - name: "europe_asia"
-    filters:
-      geo_zone: ["Europe", "Asia"]
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # REPORTE — Título y salidas
@@ -197,12 +182,8 @@ wordclouds:
 
 reporting:
   report_title:       "Análisis de Incidentes de IA"
-  data_source_label:  "AI Incident Database (AIID)"
-  figures_dpi:        300
-  figures_dir:        "outputs/figures"
-  reports_dir:        "outputs/reports"
-  show_data_tables:   false   # true = incluir tablas de datos bajo cada gráfico
-  pdf_library:        "fpdf2"
+  data_source_label:  "AI Incident Database (OECD)"
+  reports_dir:        "outputs/reports"   # Dónde guardar el HTML y el JSON de métricas
 
   html_report:
     filter_columns:       []       # Vacío = todas las columnas disponibles
