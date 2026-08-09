@@ -1,164 +1,165 @@
-# AI Incidents Analysis Pipeline
+# Pipeline de Análisis de Incidentes de IA
 
-Pipeline modular y reproducible para el análisis de incidentes de inteligencia artificial.
-Transforma un dataset crudo (OECD AIM, AIID u otro compatible) en un dataset enriquecido,
-un almacén de métricas en JSON y un reporte ejecutivo en PDF con las figuras y tablas
-utilizadas en el capítulo de resultados de la tesis.
+Pipeline modular y reproducible para analizar datasets de incidentes de inteligencia artificial. A partir de un CSV, genera métricas descriptivas, visualizaciones y dos tipos de reporte: un PDF ejecutivo y un explorador HTML interactivo.
 
-## Estructura del proyecto
+Desarrollado como parte de una tesis de maestría.
 
-```
-incidents-pipeline/
-├── config/
-│   └── params.yaml               # Único punto de parametrización
-├── src/
-│   ├── __init__.py               # Logging y semillas globales
-│   ├── ingestion.py              # Carga y validación del dataset (CSV)
-│   ├── preprocessing.py          # Limpieza, fechas, filtros, multilabel
-│   ├── nlp.py                    # Normalización, tokenización, lematización
-│   ├── sentiment.py              # Backends de análisis de sentimiento
-│   ├── analysis.py               # Métricas descriptivas (JSON metrics store)
-│   └── visualization.py          # Figuras y reporte ejecutivo PDF
-├── tests/                        # Tests unitarios (pytest)
-├── data/
-│   ├── raw/                      # Dataset fuente en CSV
-│   └── processed/                # Dataset procesado en Parquet (generado)
-├── outputs/
-│   ├── figures/                  # Figuras PNG (generadas)
-│   └── reports/                  # metrics.json y executive_report.pdf (generados)
-├── pipeline_runner.ipynb         # Notebook de ejecución local
-├── pipeline_runner_colab.ipynb   # Notebook de ejecución en Google Colab
-├── requirements.txt              # Dependencias con versiones fijadas
-└── requirements_colab.txt        # Dependencias adicionales para Colab
-```
+---
 
-## Datasets soportados
+## ¿Qué hace este pipeline?
 
-El pipeline usa un sistema de mapeo de columnas (`config/params.yaml`) que permite
-adaptarlo a cualquier dataset CSV sin modificar el código:
+Dado un CSV con incidentes de IA, el pipeline:
 
-| Dataset | Fuente | Archivo de configuración |
-|---------|--------|--------------------------|
-| OECD AI Incidents Monitor (AIM) | [OECD](https://oecd.ai) | `schema_type: "OECD"` en params.yaml |
-| AI Incident Database (AIID) | [incidentdatabase.ai](https://incidentdatabase.ai) | `schema_type: "AIID"` en params.yaml |
+1. **Carga y valida** el dataset, adaptando los nombres de columna a un esquema interno.
+2. **Preprocesa** los datos: limpia texto, parsea fechas, filtra por año y región.
+3. **Procesa lenguaje natural**: tokeniza, lematiza y detecta keywords temáticas (ej: salud mental).
+4. **Analiza sentimiento** (opcional): clasifica el texto de cada incidente como negativo alto, medio o bajo.
+5. **Calcula métricas** descriptivas: distribuciones, rankings, tendencias temporales, índice de severidad.
+6. **Genera reportes**:
+   - `executive_report.pdf` — reporte ejecutivo con gráficos en alta resolución.
+   - `interactive_report.html` — explorador interactivo con filtros, scatter plots, wordclouds y más.
 
-Para cambiar de dataset, se edita la sección `data:` en `config/params.yaml`.
+---
 
-## Instalación (entorno local)
+## Cómo correr el pipeline
 
-Se requiere **Python 3.10 o superior**.
+### Opción A — Google Colab (recomendado, sin instalación)
+
+1. Abrí [`pipeline_runner_colab.ipynb`](pipeline_runner_colab.ipynb) en Google Colab.
+2. Ejecutá la **Celda 1** (Setup). Colab se reinicia automáticamente — es normal.
+3. Editá la **Celda 2 (Configuración)** con la ruta de tu CSV y las columnas de tu dataset.
+4. Ejecutá el resto de las celdas en orden.
+5. Al final, la **Celda 13** descarga los reportes generados.
+
+> 💡 Para usar análisis de sentimiento con GPU: `Entorno de ejecución → Cambiar tipo de entorno → T4 GPU`
+
+### Opción B — Entorno local
+
+Requiere **Python 3.10 o superior**.
 
 ```bash
-git clone https://github.com/karenrg/incidents_pipeline.git
+git clone https://github.com/karenrg/incidents_pipeline
 cd incidents_pipeline
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-La primera ejecución descarga automáticamente los recursos de NLTK necesarios
-(`wordnet`, `omw-1.4`, `stopwords`).
+Luego editá `config/params.yaml` y ejecutá `pipeline_runner.ipynb`.
 
-## Ejecución en Google Colab
-
-Usá `pipeline_runner_colab.ipynb`. Las instrucciones están en la primera celda del notebook.
-
-**Pasos:**
-1. Abrí el notebook en Colab.
-2. Ejecutá la **Celda 1** (Setup). Colab se reinicia automáticamente — es normal.
-3. Después del reinicio, ejecutá desde la **Celda 2** en adelante.
-4. Editá la **Celda 4 (Configuración)** si querés cambiar algún parámetro.
-
-> Tip: activar GPU en `Entorno de ejecución → Cambiar tipo de entorno → T4 GPU`
-> reduce el tiempo del paso de sentimiento de ~10 min a ~2 min.
+---
 
 ## Configuración
 
-Todos los parámetros se definen en `config/params.yaml`:
+### Mínimo necesario
 
-| Sección | Qué controla |
-|---------|-------------|
-| `data` | Ruta del CSV, tipo de esquema, mapeo de columnas, columnas multivaluadas |
-| `filters` | Rango de años y regiones a incluir |
-| `nlp` | Idioma, stopwords personalizadas, mapa de normalización, keywords de salud mental |
-| `sentiment` | Backend, modelo, batch size, umbrales de clasificación |
-| `analysis` | Grupos vulnerables, tipos de daño, N para rankings, ventanas de media móvil |
-| `wordclouds` | Nubes de palabras a generar (con filtros opcionales por columna) |
-| `reporting` | Título del reporte, fuente de datos, DPI de figuras, directorios de salida |
+Solo necesitás indicar la ruta de tu CSV y qué columna de tu dataset cumple cada rol:
 
-### Backends de sentimiento
+```yaml
+# config/params.yaml
+data:
+  source_path: "data/raw/mi_dataset.csv"
+  column_mapping:
+    text_data:  "descripcion"   # Texto principal del incidente
+    event_date: "fecha"         # Fecha del incidente
+    geo_zone:   "region"        # Región (opcional)
+    # ... resto de columnas son opcionales
+```
 
-| Backend | Descripción | Requisito |
-|---------|-------------|-----------|
-| `transformer` | Modelo HuggingFace (`cardiffnlp/twitter-roberta-base-sentiment-latest`) | ninguno adicional |
-| `openai` | API de OpenAI (`gpt-4o-mini` por defecto) | API key (ver abajo) |
-| `traditional_ml` | TF-IDF + SVM con pseudo-etiquetas VADER | ninguno adicional |
+Con solo eso, el pipeline corre completo con valores por defecto para todo lo demás.
 
-### Configurar la API key de OpenAI
+### Análisis de sentimiento (opcional)
 
-Hay dos formas (usar solo una):
+Desactivado por defecto. Para activarlo:
 
-**Opción A — Variable de entorno (recomendado):**
+```yaml
+sentiment:
+  enabled: true
+  backend: "openai"        # "openai", "transformer" o "traditional_ml"
+  openai_model: "gpt-4o-mini"
+  openai_api_key: ""       # O usá la variable de entorno OPENAI_API_KEY
+```
+
+| Backend | Descripción | Requiere |
+|---------|-------------|----------|
+| `openai` | GPT-4o-mini vía API (más preciso) | API key de OpenAI |
+| `transformer` | Modelo HuggingFace (~500 MB de descarga) | Nada adicional |
+| `traditional_ml` | TF-IDF + SVM, sin descarga | Nada adicional |
+
+**Para configurar la API key de OpenAI:**
+
 ```bash
+# Opción recomendada: variable de entorno (no queda en el código)
 export OPENAI_API_KEY="sk-proj-..."   # Linux/Mac
 set OPENAI_API_KEY=sk-proj-...        # Windows CMD
 ```
 
-**Opción B — Campo en params.yaml (solo para uso local, no commitear):**
-```yaml
-sentiment:
-  backend: "openai"
-  openai_api_key: "sk-proj-..."   # ← vaciar antes de hacer git commit
+En Colab, usá **Secrets** (ícono 🔑 en el panel izquierdo) con el nombre `OPENAI_API_KEY`.
+
+---
+
+## Estructura del proyecto
+
+```
+incidents-pipeline/
+│
+├── config/
+│   └── params.yaml                 # Configuración del pipeline (editá esto)
+│
+├── src/
+│   ├── __init__.py                 # Logging y semillas globales
+│   ├── ingestion.py                # Carga del CSV y validación de columnas
+│   ├── preprocessing.py            # Limpieza, fechas, filtros, columnas multilabel
+│   ├── nlp.py                      # Tokenización, lematización, stopwords
+│   ├── sentiment.py                # Análisis de sentimiento (3 backends)
+│   ├── analysis.py                 # Cálculo de métricas descriptivas
+│   ├── visualization.py            # Gráficos PNG y reporte PDF
+│   └── html_report.py              # Reporte HTML interactivo
+│
+├── data/
+│   ├── raw/                        # Poné tu CSV aquí
+│   └── processed/                  # Dataset procesado (generado automáticamente)
+│
+├── outputs/
+│   ├── figures/                    # Gráficos PNG individuales (generados)
+│   └── reports/                    # PDF, HTML y metrics.json (generados)
+│
+├── tests/                          # Tests unitarios (pytest)
+│
+├── pipeline_runner.ipynb           # Notebook para correr en local
+├── pipeline_runner_colab.ipynb     # Notebook para correr en Google Colab
+├── requirements.txt                # Dependencias para entorno local
+└── requirements_colab.txt          # Dependencias para Google Colab
 ```
 
-## Ejecución del pipeline (local)
+---
 
-Abrí y ejecutá `pipeline_runner.ipynb` de principio a fin. El notebook:
+## Archivos generados
 
-1. Lee `config/params.yaml` y fija las semillas globales.
-2. Ejecuta ingestión → preprocesamiento → NLP → análisis de sentimiento.
-3. Guarda el dataset procesado en `data/processed/incidents_processed.parquet`.
-4. Calcula métricas descriptivas y las guarda en `outputs/reports/metrics.json`.
-5. Genera figuras en `outputs/figures/` y el reporte en `outputs/reports/executive_report.pdf`.
+| Archivo | Descripción |
+|---------|-------------|
+| `data/processed/incidents_processed.parquet` | Dataset enriquecido con columnas calculadas |
+| `outputs/reports/metrics.json` | Todas las métricas en formato JSON |
+| `outputs/reports/executive_report.pdf` | Reporte ejecutivo con metodología y gráficos |
+| `outputs/reports/interactive_report.html` | Explorador interactivo (abrir en el navegador) |
+| `outputs/figures/*.png` | Gráficos individuales en 300 DPI |
 
-## Descripción de módulos
+> Los directorios `data/processed/` y `outputs/` están en `.gitignore` porque son artefactos generados que se reproducen corriendo el pipeline.
 
-### `src/ingestion.py`
-Lee el CSV fuente, intenta múltiples encodings y separadores, y renombra las columnas
-al esquema interno del pipeline usando `column_mapping` de `params.yaml`.
-Loga advertencias si columnas críticas son nulas o si hay filas duplicadas.
+---
 
-### `src/preprocessing.py`
-- Convierte columnas multivaluadas (strings tipo `"['a','b']"`) a listas Python.
-- Parsea fechas, genera columnas `year` y `year_month`, filtra por rango de años.
-- Filtra por regiones geográficas configuradas.
-- Aplica recategorización de tipos de daño.
-- Binariza columnas multilabel (one-hot) para el branch ML.
+## Datasets compatibles
 
-### `src/nlp.py`
-Normalización Unicode, tokenización, lematización con WordNet, remoción de stopwords
-(NLTK + stopwords personalizadas), mapa de normalización configurable.
-Calcula un flag binario `mental_health_flag` basado en keywords configuradas.
+El pipeline funciona con cualquier CSV de incidentes de IA. Está probado con:
 
-### `src/sentiment.py`
-Tres backends intercambiables vía `params.yaml`:
-- **TransformerSentiment**: pipeline de HuggingFace con clasificación en batches.
-- **OpenAISentiment**: prompt al API de OpenAI con respuesta estructurada en JSON.
-- **MLSentiment**: TF-IDF + SVM con pseudo-etiquetas generadas por NLTK VADER.
+| Dataset | Fuente |
+|---------|--------|
+| AI Incident Database (AIID) | [incidentdatabase.ai](https://incidentdatabase.ai) |
+| OECD AI Incidents Monitor (AIM) | [oecd.ai](https://oecd.ai) |
 
-Todos devuelven un score continuo de negatividad en `[0, 1]` que se clasifica en
-Alta / Media / Baja según umbrales configurados.
+Para adaptarlo a otro dataset, solo cambiás el `column_mapping` en `params.yaml` (o en la celda de configuración del notebook Colab).
 
-### `src/analysis.py`
-Calcula y serializa a JSON todas las métricas descriptivas:
-evolución regional, concentración acumulada, distribución de principios,
-tipos de daño, industrias, stakeholders, grupos vulnerables, cronología de daño,
-índice de severidad, análisis de salud mental, negatividad por principio en el tiempo.
-
-### `src/visualization.py`
-Genera todas las figuras en PNG (matplotlib) y ensambla el reporte ejecutivo en PDF (fpdf2).
-Usa `config["reporting"]["data_source_label"]` y `config["reporting"]["report_title"]`
-para que el reporte sea genérico respecto al dataset usado.
+---
 
 ## Tests
 
@@ -166,18 +167,15 @@ para que el reporte sea genérico respecto al dataset usado.
 pytest
 ```
 
-Los tests cubren ingestion (mapeo de columnas, validaciones), preprocesamiento
-(parseo de listas, fechas, filtros, binarización multilabel) y análisis de sentimiento
-(clasificación por umbrales, backend traditional_ml, evaluación contra anotaciones humanas).
+Cubren ingestion (mapeo de columnas, validaciones), preprocesamiento (parseo de listas, fechas, filtros) y sentiment (clasificación por umbrales, backend traditional_ml).
 
-## Salidas generadas
+---
 
-| Archivo | Descripción |
-|---------|-------------|
-| `data/processed/incidents_processed.parquet` | Dataset enriquecido y estandarizado |
-| `outputs/reports/metrics.json` | Almacén de métricas (todas las agregaciones) |
-| `outputs/reports/executive_report.pdf` | Reporte ejecutivo con metodología y figuras |
-| `outputs/figures/*.png` | Figuras individuales en alta resolución (300 DPI) |
+## Buenas prácticas implementadas
 
-> Los directorios `data/processed/` y `outputs/` están en `.gitignore` ya que son
-> artefactos generados que se reproducen ejecutando el pipeline.
+- **Único punto de configuración**: todo en `config/params.yaml`, sin constantes dispersas en el código.
+- **Sin secretos en el repositorio**: las API keys se leen de variables de entorno o Secrets de Colab.
+- **Reproducibilidad**: semilla global configurable (`random_state`) y dependencias con versiones fijadas.
+- **Modularidad**: cada módulo en `src/` tiene una responsabilidad única y puede testearse por separado.
+- **Sensible a datos faltantes**: columnas opcionales vacías no rompen el pipeline.
+- **Logging estructurado**: todos los pasos loguean con nivel y contexto para facilitar el debugging.

@@ -1,5 +1,6 @@
 """Figure generation and executive PDF report assembly."""
 
+import io
 import logging
 from pathlib import Path
 
@@ -535,6 +536,24 @@ def _write_methodology(pdf, config: dict) -> None:
     pdf.multi_cell(0, 6, text)
 
 
+def _png_to_jpeg_buf(path: Path, max_px: int = 1400) -> io.BytesIO:
+    """Convert a PNG to a JPEG BytesIO buffer for fpdf2.
+
+    fpdf2 can hang on large PNGs with alpha channels. Converting to JPEG
+    (RGB, no alpha, capped resolution) avoids the issue entirely.
+    """
+    from PIL import Image
+
+    img = Image.open(path).convert("RGB")
+    if img.width > max_px:
+        ratio = max_px / img.width
+        img = img.resize((max_px, int(img.height * ratio)), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+    return buf
+
+
 def generate_report(metrics: dict, figures: dict[str, Path], config: dict) -> Path:
     """Assemble the executive PDF report."""
     from fpdf import FPDF
@@ -562,7 +581,7 @@ def generate_report(metrics: dict, figures: dict[str, Path], config: dict) -> Pa
         section_title = _FIGURE_TITLES.get(name) or _auto_title(name)
         pdf.set_font("Helvetica", "B", 13)
         pdf.cell(0, 10, section_title, ln=True)
-        pdf.image(str(path), w=pdf.epw)
+        pdf.image(_png_to_jpeg_buf(path), w=pdf.epw)
 
         if show_tables:
             pdf.ln(3)

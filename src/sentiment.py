@@ -302,6 +302,9 @@ def evaluate_sentiment(df: pd.DataFrame, config: dict) -> dict | None:
 def run_sentiment(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     """Score sentiment, classify it, and optionally evaluate against labels.
 
+    Skips gracefully if ``config['sentiment']['enabled']`` is ``False``,
+    returning the DataFrame unchanged.
+
     Args:
         df: Input DataFrame with a ``text_data`` column.
         config: Parsed pipeline configuration (``params.yaml``).
@@ -309,7 +312,12 @@ def run_sentiment(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     Returns:
         Copy of ``df`` with ``sentiment_score`` (continuous negativity) and
         ``sentiment_label`` (``"Alta"``/``"Media"``/``"Baja"``) columns added.
+        If sentiment is disabled, returns ``df`` unchanged.
     """
+    if not config.get("sentiment", {}).get("enabled", True):
+        logger.info("Sentiment analysis disabled — skipping.")
+        return df
+
     df = df.copy()
 
     analyzer = build_analyzer(config)
