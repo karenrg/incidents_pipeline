@@ -149,8 +149,16 @@ def build_analyzer(config: dict) -> SentimentAnalyzer:
     backend = sentiment_config["backend"]
 
     if backend == "transformer":
+        _EN_DEFAULT = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+        _ES_DEFAULT = "pysentimiento/robertuito-sentiment-analysis"
+        model_name  = sentiment_config.get("model_name", _EN_DEFAULT)
+        language    = config.get("nlp", {}).get("language", "english")
+        # Auto-select Spanish model when language=spanish and model is still English default
+        if language == "spanish" and model_name == _EN_DEFAULT:
+            model_name = _ES_DEFAULT
+            logger.info("language=spanish — auto-selected sentiment model: %s", model_name)
         return TransformerSentiment(
-            model_name=sentiment_config["model_name"],
+            model_name=model_name,
             batch_size=sentiment_config.get("batch_size", 32),
         )
     if backend == "openai":

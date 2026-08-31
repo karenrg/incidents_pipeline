@@ -27,7 +27,7 @@ Dado un CSV, el pipeline:
 2. Ejecutá la **Celda 1** (Setup). Colab se reinicia automáticamente — es normal.
 3. Editá la **Celda 2 (Configuración)** con la ruta de tu CSV y el mapeo de columnas.
 4. Ejecutá el resto de las celdas en orden.
-5. La **Celda 12** descarga el reporte HTML y el JSON de métricas.
+5. La **última celda** descarga el reporte HTML, el JSON de métricas y el CSV de datos procesados.
 
 > 💡 Para usar análisis de sentimiento con GPU: `Entorno de ejecución → Cambiar tipo de entorno → T4 GPU`
 
@@ -66,6 +66,25 @@ data:
 
 Con solo eso, el pipeline corre completo con valores por defecto para todo lo demás.
 
+> **Nota sobre nombres de columnas en el output:** el pipeline usa un esquema interno de nombres durante el procesamiento (`text_data`, `geo_zone`, `tags_list`, etc.), pero los archivos de salida los restauran a los nombres originales de tu CSV según el `column_mapping` de `params.yaml`. Por ejemplo, si mapeaste `tags_list: "Type"`, en `incidents_processed.csv` y en el reporte HTML esa columna aparece como `Type`. Las columnas derivadas que agrega el pipeline (`year`, `mental_health_flag`, `sentiment_score`, etc.) no tienen equivalente en el CSV original, así que mantienen su nombre descriptivo.
+
+### Datasets en idiomas distintos al inglés
+
+Por defecto el pipeline usa stopwords y lematización en inglés (WordNet). Para datasets en español, configurá el parámetro `nlp.language: "spanish"`: el pipeline usará automáticamente spaCy (`es_core_news_sm`) para lematización completa en español, o SnowballStemmer como fallback si spaCy no está disponible.
+
+```yaml
+nlp:
+  language: "spanish"   # "english" por defecto
+  mental_health_keywords:
+    - "salud mental"
+    - "estrés"
+    - "ansiedad"
+    - "depresión"
+    - "psicológico"
+```
+
+En Colab, estos parámetros se configuran en la **Celda 2** con las variables `NLP_LANGUAGE` y `MENTAL_HEALTH_KEYWORDS`. Para análisis de sentimiento en español, usá el backend transformer con el modelo `pysentimiento/robertuito-sentiment-analysis` (ver tabla de modelos abajo).
+
 ### Análisis de sentimiento (opcional)
 
 Desactivado por defecto. Para activarlo:
@@ -81,7 +100,17 @@ sentiment:
 | Backend | Descripción | Requiere |
 |---------|-------------|----------|
 | `openai` | GPT-4o-mini vía API (más preciso) | API key de OpenAI |
-| `transformer` | Modelo de HuggingFace configurable (`model_name` en params.yaml). Default: `cardiffnlp/twitter-roberta-base-sentiment-latest` | Nada adicional |
+| `transformer` | Modelo de HuggingFace configurable (`model_name` en params.yaml). Default: `cardiffnlp/twitter-roberta-base-sentiment-latest` (inglés) | Nada adicional |
+
+**Modelos transformer recomendados por idioma:**
+
+| Idioma | Modelo | Notas |
+|--------|--------|-------|
+| Inglés | `cardiffnlp/twitter-roberta-base-sentiment-latest` | Default |
+| Español | `pysentimiento/robertuito-sentiment-analysis` | Más preciso para español |
+| Multiidioma | `cardiffnlp/twitter-xlm-roberta-base-sentiment` | Funciona en ambos |
+
+> **Requisito del modelo:** el pipeline extrae el score de negatividad buscando el label que contenga `"neg"` (ej: `"negative"`, `"NEG"`). Cualquier modelo de HuggingFace con ese tipo de label es compatible. Modelos que usan labels como `"1 star"`/`"5 stars"` no son compatibles sin modificar `sentiment.py`.
 
 **Para configurar la API key de OpenAI:**
 
@@ -131,13 +160,38 @@ incidents-pipeline/
 
 ## Archivos generados
 
-| Archivo | Descripción |
-|---------|-------------|
-| `data/processed/incidents_processed.parquet` | Dataset enriquecido con columnas calculadas |
-| `outputs/reports/metrics.json` | Todas las métricas en formato JSON |
-| `outputs/reports/interactive_report.html` | Reporte interactivo (abrir en el navegador) |
+### Datos procesados
+
+| Archivo | Formato | Descripción |
+|---------|---------|-------------|
+| `data/processed/incidents_processed.parquet` | Parquet | Dataset completo post-pipeline: columnas originales + `year`, `year_month`, `tokens`, `mental_health_flag`, columnas `mlb_*` (one-hot por industria). Es el archivo "fuente de verdad" para análisis adicionales con pandas, R, etc. |
+| `outputs/reports/incidents_processed.csv` | CSV | Mismo dataset que el parquet pero sin las columnas técnicas (`mlb_*`, `tokens`, `year_month`). Pensado para abrir en Excel o Google Sheets. Se descarga automáticamente desde Colab. |
+
+### Reportes
+
+| Archivo | Formato | Descripción |
+|---------|---------|-------------|
+| `outputs/reports/metrics.json` | JSON | Métricas pre-agregadas que usa el reporte HTML: distribuciones por región, ranking de industrias, evolución temporal, índice de severidad, etc. Útil si querés consumir los números directamente sin abrir el HTML. |
+| `outputs/reports/interactive_report.html` | HTML | Reporte autocontenido (~9 MB). Tiene todos los datos embebidos — no necesita servidor ni conexión. Abrilo en el navegador. Incluye: explorador de columnas, filtros dinámicos, scatter plot, tabla cruzada, wordcloud y panel de configuración para ajustar grupos vulnerables, tipos de daño y escala de severidad. |
 
 > Los directorios `data/processed/` y `outputs/` están en `.gitignore` porque son artefactos generados que se reproducen corriendo el pipeline.
+
+---
+
+## Columnas de `incidents_processed.csv`
+
+El CSV usa los nombres originales de tu CSV para las columnas mapeadas, más las columnas calculadas por el pipeline con nombres descriptivos fijos:
+
+| Columna en el output | Origen | Descripción |
+|----------------------|--------|-------------|
+| *(tu nombre original)* | Del CSV | Las columnas que configuraste en `column_mapping` aparecen con su nombre original. Por ejemplo, si mapeaste `tags_list: "Type"`, aparece como `Type`. |
+| `year` | **Calculada** | Año extraído de la columna de fecha (entero). Útil para filtrar y agrupar. |
+| `harmtype_category` | **Calculada** | Versión agrupada del tipo de daño según `harm_aggregations` en `params.yaml`. |
+| `mental_health_flag` | **Calculada** | `1` si el texto contiene alguna de las `mental_health_keywords` configuradas, `0` si no. |
+| `sentiment_score` | **Calculada** | Score de negatividad [0, 1]. Solo aparece si el análisis de sentimiento está activado. |
+| `sentiment_label` | **Calculada** | Clasificación en Alta / Media / Baja según umbrales de `params.yaml`. Solo si sentimiento está activado. |
+
+> Las columnas multilabel (tipos de daño, industrias, grupos afectados, etc.) están serializadas como listas Python — por ejemplo `['Physical', 'Psychological']`. En Excel van a aparecer como texto; en pandas podés recuperarlas con `ast.literal_eval()`.
 
 ---
 

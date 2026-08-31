@@ -1,0 +1,144 @@
+# =============================================================================
+# Configuración para: Spanish News Classification (Kaggle - kevinmorgado)
+# https://www.kaggle.com/datasets/kevinmorgado/spanish-news-classification
+# =============================================================================
+# ⚠️  Antes de correr: revisá los nombres de columna del CSV y ajustá
+#     el column_mapping. Dejá "" en los campos que no existan en el dataset.
+# =============================================================================
+
+data:
+  source_path: "data/raw/spanish_news.csv"   # renombrá el CSV descargado así
+
+  # Completar con los nombres exactos de columna del CSV de Kaggle.
+  # Columnas comunes en este dataset: titulo, categoria, texto, fecha (o similares).
+  # Descargá el CSV, abrilo y copiá los nombres exactos de la primera fila.
+  column_mapping:
+    text_data:   "news"   # texto de la noticia
+    event_date:  ""       # sin fecha en este dataset
+    geo_zone:    ""       # sin región
+    tags_list:   "Type"   # categoría (deportes, política, etc.)
+    harmtype:    ""
+    industries:  ""
+    harmed:      ""
+    harmlevel:   ""
+
+  multilabel_columns: []   # las categorías de noticias no son multilabel
+
+  processed_path: "data/processed/spanish_news_processed.parquet"
+
+
+filters:
+  year_range: []
+  regions: []
+
+
+# =============================================================================
+# SENTIMIENTO — OpenAI (completá solo el api_key)
+# =============================================================================
+sentiment:
+  enabled: true
+  backend: "openai"
+  openai_model: "gpt-4o-mini"
+  openai_api_key: ""   # ← pegá tu API key acá (o usá variable de entorno)
+
+  # No necesario para openai, pero se deja para referencia
+  model_name:  "cardiffnlp/twitter-roberta-base-sentiment-latest"
+  batch_size:  32
+
+  thresholds:
+    high:   0.7
+    medium: 0.4
+
+  evaluation:
+    enabled: false
+    human_label_column: ""
+
+
+# =============================================================================
+# NLP — Español
+# =============================================================================
+nlp:
+  language: "spanish"
+  min_token_length: 3
+
+  custom_stopwords:
+    - "el"
+    - "la"
+    - "los"
+    - "las"
+    - "un"
+    - "una"
+    - "del"
+    - "que"
+    - "con"
+    - "por"
+    - "para"
+    - "como"
+    - "más"
+    - "pero"
+    - "sus"
+    - "fue"
+    - "han"
+    - "hay"
+    - "ser"
+    - "son"
+
+  normalization_map: {}
+
+  mental_health_keywords:
+    - "salud mental"
+    - "estrés"
+    - "ansiedad"
+    - "depresión"
+    - "psicológico"
+    - "suicidio"
+    - "bienestar"
+
+
+# =============================================================================
+# ANÁLISIS
+# =============================================================================
+analysis:
+  columns:
+    region:             "geo_zone"
+    year:               "year"
+    year_month:         "year_month"
+    tags:               "tags_list"
+    harm_type:          "harmtype"
+    industries:         "industries"
+    harmed:             "harmed"
+    harm_level:         "harmlevel"
+    sentiment_score:    "sentiment_score"
+    mental_health_flag: "mental_health_flag"
+    tokens:             "tokens"
+
+  exclude_values: ["", "nan", "None"]
+
+  vulnerable_groups: []   # no aplica para noticias
+
+  top_n_principles: 10    # top categorías de noticias a mostrar
+  top_n_industries: 10
+  top_n_harmed:     10
+
+  moving_average_windows: [3, 6, 12]
+
+  harm_chronology_types: []   # sin harm types en noticias
+
+  harm_aggregations: {}
+
+  harm_level_severity: {}   # sin severity en noticias
+
+
+# =============================================================================
+# REPORTE
+# =============================================================================
+reporting:
+  report_title:       "Análisis de Noticias en Español"
+  data_source_label:  "Spanish News Classification (Kaggle)"
+  reports_dir:        "outputs/reports"
+
+  html_report:
+    filter_columns:       []
+    range_filter_columns: ["year"]
+
+random_state: 42

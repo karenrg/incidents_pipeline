@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import json
 import logging
+import warnings
 from pathlib import Path
+
+# JS regex inside Python f-strings contain \s \w \b — suppress the SyntaxWarning
+warnings.filterwarnings("ignore", category=SyntaxWarning, module=__name__)
 
 import numpy as np
 import pandas as pd
@@ -32,9 +36,10 @@ def generate_html_report(df: pd.DataFrame, metrics: dict, config: dict) -> Path:
     col_roles = config["analysis"]["columns"]
     reporting = config["reporting"]
 
-    # Inject column_mapping into reporting so _render_html can build COL_LABELS
+    # Inject extra keys into reporting so _render_html can use them
     reporting = dict(reporting)
-    reporting["_col_mapping"] = config.get("data", {}).get("column_mapping", {})
+    reporting["_col_mapping"]    = config.get("data", {}).get("column_mapping", {})
+    reporting["_nlp_stopwords"]  = config.get("nlp", {}).get("custom_stopwords", [])
 
     html = _render_html(eda_stats, records, col_roles, metrics, reporting)
 
@@ -88,16 +93,66 @@ def _excl_eda(config: dict) -> set[str]:
     return {text_col, config["analysis"]["columns"].get("tokens", "tokens")}
 
 
-def _excl_records(config: dict) -> set[str]:
-    """Columns excluded from embedded DATA_RECORDS.
-    text_data is now included so the wordcloud can use full descriptions."""
-    return set()
+def _excl_records(df_columns: "list[str]") -> set[str]:
+    """Columns excluded from embedded DATA_RECORDS to keep the HTML lightweight.
+
+    Excluded:
+    - ``tokens``            – pre-tokenized list, not used in JS
+    - ``evidences``         – raw evidence text, not rendered in JS
+    - ``country``           – sub-region granularity, not mapped to a COL_ROLE
+    - ``threat``            – boolean flag not rendered anywhere
+    - ``year_month``        – Period type; JS uses ``year`` directly
+    - ``harmtype_category`` – derived column, redundant in client
+    - ``mlb_*``             – one-hot encoded columns for ML only, not for JS
+    """
+    static_excl = {
+        "tokens", "evidences", "country", "threat",
+        "year_month", "harmtype_category",
+    }
+    mlb_cols = {c for c in df_columns if c.startswith("mlb_")}
+    return static_excl | mlb_cols
 
 
 def _count_duplicates(df: pd.DataFrame) -> int:
     hashable = [c for c in df.columns
                 if not df[c].dropna().apply(lambda x: isinstance(x, list)).any()]
     return int(df[hashable].duplicated().sum()) if hashable else 0
+
+
+def _is_list_series(s: "pd.Series") -> bool:
+    """Return True if any non-null value in *s* is a list or a Python-style
+    string representation of one (e.g. ``"['a', 'b']"``)."""
+    for v in s.dropna().head(10):
+        if isinstance(v, list):
+            return True
+        if isinstance(v, str) and v.strip().startswith("["):
+            return True
+    return False
+
+
+def _ensure_list(v: object) -> list:
+    """Convert a value to a flat Python list.
+
+    Handles real lists, Python-style string lists (``"['a', 'b']"``), and
+    plain scalars.
+    """
+    import ast as _ast
+
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str):
+        stripped = v.strip()
+        if stripped == "[]":
+            return []
+        if stripped.startswith("["):
+            try:
+                result = _ast.literal_eval(stripped)
+                return result if isinstance(result, list) else [result]
+            except (ValueError, SyntaxError):
+                pass
+    if v is None or (isinstance(v, float) and v != v):  # None or NaN
+        return []
+    return [v]
 
 
 def _compute_eda_stats(df: pd.DataFrame, config: dict) -> dict:
@@ -114,7 +169,7 @@ def _compute_eda_stats(df: pd.DataFrame, config: dict) -> dict:
         if col in excl:
             continue
         s = df[col]
-        is_list_col = s.dropna().apply(lambda x: isinstance(x, list)).any()
+        is_list_col = _is_list_series(s)
         entry: dict = {
             "name": col,
             "null_count": int(s.isnull().sum()),
@@ -122,7 +177,11 @@ def _compute_eda_stats(df: pd.DataFrame, config: dict) -> dict:
         }
         if is_list_col:
             entry["col_type"] = "list"
-            exploded = s.explode().dropna()
+            # Parse string representations of lists before exploding so that
+            # each individual element is counted separately.
+            parsed = s.apply(_ensure_list)
+            exploded = parsed.explode().dropna()
+            exploded = exploded[exploded.astype(str).str.strip().ne("")]
             entry["unique_count"] = int(exploded.nunique())
             vc = exploded.value_counts().head(20)
             entry["top_values"] = [str(x) for x in vc.index.tolist()]
@@ -155,8 +214,12 @@ def _compute_eda_stats(df: pd.DataFrame, config: dict) -> dict:
 
 
 def _prepare_records(df: pd.DataFrame, config: dict) -> list[dict]:
-    """Embed all columns except raw text (tokens ARE included for wordcloud)."""
-    excl = _excl_records(config)
+    """Embed only the columns the JS report actually needs.
+
+    Excludes heavyweight / ML-only columns (tokens, evidences, mlb_*, etc.)
+    to keep the HTML file under ~15 MB instead of ~27 MB.
+    """
+    excl = _excl_records(list(df.columns))
     cols = [c for c in df.columns if c not in excl]
     return [{col: _safe(row[col]) for col in cols} for _, row in df[cols].iterrows()]
 
@@ -179,14 +242,20 @@ def _render_html(
     data_json    = json.dumps(records,    cls=_NpEncoder, ensure_ascii=False)
     roles_json   = json.dumps(col_roles,  ensure_ascii=False)
     metrics_json = json.dumps(metrics,    cls=_NpEncoder, ensure_ascii=False)
+    # AVAIL_COLS: actual df column names present in DATA_RECORDS (used by JS to hide irrelevant charts)
+    avail_cols   = list(records[0].keys()) if records else []
+    avail_cols_json = json.dumps(avail_cols, ensure_ascii=False)
     # COL_LABELS: internal column name → original CSV column name (for display in selectors)
     col_mapping   = reporting.get("_col_mapping", {})
     col_labels_json = json.dumps(col_mapping, ensure_ascii=False)
     html_cfg     = reporting.get("html_report", {})
+    # Merge NLP custom stopwords so the JS wordcloud uses the same list as the pipeline
+    nlp_stopwords = reporting.get("_nlp_stopwords", [])
     html_cfg_json = json.dumps({
         "filter_columns":       html_cfg.get("filter_columns", []),
         "range_filter_columns": html_cfg.get("range_filter_columns", ["year"]),
         "kpi_labels":           html_cfg.get("kpi_labels", {}),
+        "custom_stopwords":     nlp_stopwords,
     }, ensure_ascii=False)
 
     return f"""<!DOCTYPE html>
@@ -224,6 +293,12 @@ def _render_html(
   <!-- 1. Resumen de columnas -->
   <section>
     <h2 class="section-title" data-i18n="col_summary_title">Resumen de columnas</h2>
+    <div class="hint multilabel-note" data-i18n="multilabel_note">
+      <strong>Nota metodológica:</strong> las columnas marcadas como <em>multilabel</em> (principios, industrias, grupos afectados, tipos de daño)
+      pueden contener múltiples valores por incidente. Para calcular frecuencias y distribuciones, el pipeline aplica
+      <em>binary relevance decomposition</em>: cada valor de la lista se trata como una fila independiente.
+      Esto implica que las sumas de esas columnas superan el total de incidentes — es el comportamiento esperado, no un error.
+    </div>
     <div id="col-summary-table" class="summary-table-wrap"></div>
   </section>
 
@@ -249,49 +324,6 @@ def _render_html(
     </div>
   </section>
 
-  <!-- 4. Scatter Plot -->
-  <section>
-    <h2 class="section-title" data-i18n="section_scatter">Scatter Plot</h2>
-    <p class="hint" data-i18n="section_scatter_hint">Seleccioná dos columnas numéricas para explorar su relación.</p>
-    <div class="filter-panel">
-      <div class="filter-builder" style="flex-wrap:wrap;gap:10px">
-        <div style="display:flex;flex-direction:column;gap:4px">
-          <label style="font-size:.78rem;color:#666;font-weight:600" data-i18n="scatter_x">Eje X</label>
-          <select id="scatter-x" class="filter-builder select" style="min-width:170px"></select>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:4px">
-          <label style="font-size:.78rem;color:#666;font-weight:600" data-i18n="scatter_y">Eje Y</label>
-          <select id="scatter-y" class="filter-builder select" style="min-width:170px"></select>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:4px">
-          <label style="font-size:.78rem;color:#666;font-weight:600" data-i18n="scatter_color">Color por</label>
-          <select id="scatter-color" class="filter-builder select" style="min-width:170px"></select>
-        </div>
-        <button class="btn-add" style="align-self:flex-end" onclick="renderScatter()" data-i18n="btn_generate">Generar</button>
-      </div>
-    </div>
-    <div class="chart-card"><div id="scatter-chart" class="chart-area"></div></div>
-  </section>
-
-  <!-- 5. Tabla cruzada -->
-  <section>
-    <h2 class="section-title" data-i18n="section_crosstab">Tabla cruzada</h2>
-    <p class="hint" data-i18n="section_crosstab_hint">Seleccioná dos columnas categóricas para ver su co-ocurrencia.</p>
-    <div class="filter-panel">
-      <div class="filter-builder" style="flex-wrap:wrap;gap:10px">
-        <div style="display:flex;flex-direction:column;gap:4px">
-          <label style="font-size:.78rem;color:#666;font-weight:600" data-i18n="crosstab_row">Filas</label>
-          <select id="cross-row" class="filter-builder select" style="min-width:170px"></select>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:4px">
-          <label style="font-size:.78rem;color:#666;font-weight:600" data-i18n="crosstab_col">Columnas</label>
-          <select id="cross-col" class="filter-builder select" style="min-width:170px"></select>
-        </div>
-        <button class="btn-add" style="align-self:flex-end" onclick="renderCrosstab()" data-i18n="btn_generate">Generar</button>
-      </div>
-    </div>
-    <div class="chart-card"><div id="crosstab-chart" class="chart-area"></div></div>
-  </section>
 
 </div>
 
@@ -316,7 +348,39 @@ def _render_html(
       <div id="af-regions" class="af-checkboxes"></div>
     </div>
     <button class="af-clear-btn" onclick="clearAnalysisFilters()" data-i18n="af_clear">Limpiar filtros</button>
+    <button class="af-clear-btn af-config-btn" onclick="openChartConfig()" title="Configurar grupos vulnerables y tipos de daño">⚙ Configurar charts</button>
   </section>
+
+  <!-- Chart config modal -->
+  <div id="chart-config-overlay" class="cc-overlay hidden" onclick="if(event.target===this)closeChartConfig()">
+    <div class="cc-modal">
+      <div class="cc-header">
+        <span class="cc-title">⚙ Configuración de charts</span>
+        <button class="cc-close" onclick="closeChartConfig()">✕</button>
+      </div>
+      <div class="cc-body">
+
+        <!-- Vulnerable groups -->
+        <div class="cc-section">
+          <div class="cc-section-title" data-i18n="cc_vulner_title">Grupos vulnerables</div>
+          <p class="cc-hint" data-i18n="cc_vulner_hint">Seleccioná los valores del campo "harmed" que deben contarse como grupos vulnerables.</p>
+          <div id="cc-vulner-list" class="cc-checklist"></div>
+        </div>
+
+        <!-- Harm chronology types -->
+        <div class="cc-section">
+          <div class="cc-section-title" data-i18n="cc_chrono_title">Tipos de daño para la cronología</div>
+          <p class="cc-hint" data-i18n="cc_chrono_hint">Elegí 1–4 tipos de daño para mostrar su evolución en el tiempo.</p>
+          <div id="cc-chrono-list" class="cc-checklist"></div>
+        </div>
+
+      </div>
+      <div class="cc-footer">
+        <button class="cc-btn-secondary" onclick="resetChartConfig()" data-i18n="cc_reset">Restablecer</button>
+        <button class="cc-btn-primary" onclick="applyChartConfig()" data-i18n="cc_apply">Aplicar</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Pre-computed pipeline charts -->
   <section>
@@ -330,28 +394,18 @@ def _render_html(
     <h2 class="section-title" data-i18n="section_wordcloud">Nube de palabras dinámica</h2>
     <div class="wc-panel">
       <div class="wc-controls">
-        <div class="wc-ctrl-row">
-          <label data-i18n="wc_col_label">Columna de texto</label>
-          <input type="text" id="wc-col-search"
-                 placeholder="Buscar columna..."
-                 oninput="searchWcCol(this.value)"
-                 autocomplete="off" class="filter-search-input" style="margin-bottom:4px">
-          <select id="wc-col-select" onchange="onWcColChange()">
-            <option value="" data-i18n-opt="select_col">— Seleccioná una columna —</option>
-          </select>
-        </div>
-        <div id="wc-filter-wrap" class="wc-filter-wrap hidden">
-          <label data-i18n="wc_filter_label">Filtrar filas por columna</label>
+        <div id="wc-filter-wrap" class="wc-filter-wrap">
+          <label data-i18n="wc_filter_label">Filtrar por categoría (opcional)</label>
           <select id="wc-filter-col" onchange="onWcFilterColChange()">
-            <option value="" data-i18n-opt="select_col">— Columna de filtro (opcional) —</option>
+            <option value="">— Sin filtro (todos los incidentes) —</option>
           </select>
-          <div id="wc-filter-vals" class="filter-vals-list" style="max-height:100px;min-width:260px"></div>
+          <div id="wc-filter-vals" class="filter-vals-list" style="max-height:120px;min-width:260px"></div>
         </div>
         <button class="btn-add" onclick="generateWordcloud()" data-i18n="wc_generate">Generar nube</button>
       </div>
       <div class="wc-canvas-wrap">
         <canvas id="wc-canvas" width="800" height="380"></canvas>
-        <p id="wc-placeholder" class="wc-placeholder" data-i18n="wc_placeholder">Seleccioná una columna y hacé click en "Generar nube".</p>
+        <p id="wc-placeholder" class="wc-placeholder" data-i18n="wc_placeholder">Seleccioná un filtro (opcional) y hacé click en "Generar nube".</p>
       </div>
     </div>
   </section>
@@ -394,6 +448,8 @@ const HTML_CONFIG  = {html_cfg_json};
 const COL_LABELS   = {col_labels_json};
 /* Display label for a column: original CSV name if available, else internal */
 const colLabel = c => COL_LABELS[c] || c;
+/* Set of column names actually present in the dataset (used to hide irrelevant charts) */
+const AVAIL_COLS   = new Set({avail_cols_json});
 
 /* ─── i18n ───────────────────────────────────────────────────────────── */
 const LANGS = {{
@@ -417,7 +473,7 @@ const LANGS = {{
     mean_lbl: 'Media', median_lbl: 'Mediana', std_lbl: 'Desv. estándar', minmax_lbl: 'Mín / Máx',
     numeric_lbl: 'Numérico', categorical_lbl: 'Categórico', multilabel_lbl: 'Multilabel',
     frequency: 'Frecuencia', incidents: 'Incidentes', year_lbl: 'Año',
-    month_lbl: 'Mes', cum_pct: '% acumulado', severity_lbl: 'Severidad promedio',
+    month_lbl: 'Mes', cum_pct: '% acumulado',
     neg_score: 'Score de negatividad', pct_total: '% del total',
     select_col: '— Seleccioná una columna —',
     add_filter: 'Agregar filtro', clear_all: 'Limpiar todo',
@@ -430,10 +486,11 @@ const LANGS = {{
     chart_harmtype: 'Tipos de daño por región', chart_princip: 'Principios / Dominios de riesgo',
     chart_indust: 'Top industrias', chart_harmed: 'Grupos afectados por región',
     chart_vulner: 'Grupos vulnerables', chart_chrono: 'Cronología de daño',
-    chart_sev: 'Índice de severidad', chart_mh: 'Incidentes de salud mental',
-    chart_neg: 'Negatividad por principio', chart_tok: 'Tokens más frecuentes',
+    chart_mh: 'Incidentes de salud mental',
+    chart_neg: 'Negatividad mensual por principio', chart_neg_yearly: 'Negatividad anual por principio (Figura 13)', chart_tok: 'Tokens más frecuentes',
     records_of: 'registros', of_total: 'del total',
     col_summary_title: 'Resumen de columnas',
+    multilabel_note: '<strong>Nota metodológica:</strong> las columnas marcadas como <em>multilabel</em> (principios, industrias, grupos afectados, tipos de daño) pueden contener múltiples valores por incidente. Para calcular frecuencias y distribuciones, el pipeline aplica <em>binary relevance decomposition</em>: cada valor de la lista se trata como una fila independiente. Esto implica que las sumas de esas columnas superan el total de incidentes — es el comportamiento esperado, no un error.',
     col_completeness: 'Completitud por columna',
     col_completeness_hint: '% de registros con valor no nulo.',
     th_col: 'Columna', th_type: 'Tipo', th_records: 'Registros',
@@ -448,6 +505,11 @@ const LANGS = {{
     btn_generate: 'Generar', none_col: '(sin color)',
     af_year_range: 'Rango de años', af_regions: 'Regiones', af_clear: 'Limpiar filtros',
     af_active: 'Filtros activos',
+    cc_vulner_title: 'Grupos vulnerables',
+    cc_vulner_hint: 'Seleccioná los valores del campo "harmed" que deben contarse como grupos vulnerables.',
+    cc_chrono_title: 'Tipos de daño para la cronología',
+    cc_chrono_hint: 'Elegí 1–4 tipos de daño para mostrar su evolución en el tiempo.',
+    cc_reset: 'Restablecer', cc_apply: 'Aplicar',
   }},
   en: {{
     tab_eda: '🔍 Data Exploration',
@@ -469,7 +531,7 @@ const LANGS = {{
     mean_lbl: 'Mean', median_lbl: 'Median', std_lbl: 'Std. dev.', minmax_lbl: 'Min / Max',
     numeric_lbl: 'Numeric', categorical_lbl: 'Categorical', multilabel_lbl: 'Multilabel',
     frequency: 'Frequency', incidents: 'Incidents', year_lbl: 'Year',
-    month_lbl: 'Month', cum_pct: 'Cumulative %', severity_lbl: 'Avg. Severity',
+    month_lbl: 'Month', cum_pct: 'Cumulative %',
     neg_score: 'Negativity score', pct_total: '% of total',
     select_col: '— Select a column —',
     add_filter: 'Add filter', clear_all: 'Clear all',
@@ -482,10 +544,11 @@ const LANGS = {{
     chart_harmtype: 'Harm Types by Region', chart_princip: 'Principles / Risk Domains',
     chart_indust: 'Top Industries', chart_harmed: 'Affected Groups by Region',
     chart_vulner: 'Vulnerable Groups', chart_chrono: 'Harm Chronology',
-    chart_sev: 'Severity Index', chart_mh: 'Mental Health Incidents',
-    chart_neg: 'Negativity by Principle', chart_tok: 'Most Frequent Tokens',
+    chart_mh: 'Mental Health Incidents',
+    chart_neg: 'Monthly Negativity by Principle', chart_neg_yearly: 'Yearly Negativity by Principle (Figure 13)', chart_tok: 'Most Frequent Tokens',
     records_of: 'records', of_total: 'of total',
     col_summary_title: 'Column Summary',
+    multilabel_note: '<strong>Methodological note:</strong> columns marked as <em>multilabel</em> (principles, industries, affected groups, harm types) can contain multiple values per incident. To compute frequencies and distributions, the pipeline applies <em>binary relevance decomposition</em>: each value in the list is treated as an independent row. This means column totals will exceed the total number of incidents — this is expected behaviour, not an error.',
     col_completeness: 'Completeness by Column',
     col_completeness_hint: '% of records with non-null value.',
     th_col: 'Column', th_type: 'Type', th_records: 'Records',
@@ -500,6 +563,11 @@ const LANGS = {{
     btn_generate: 'Generate', none_col: '(no color)',
     af_year_range: 'Year range', af_regions: 'Regions', af_clear: 'Clear filters',
     af_active: 'Active filters',
+    cc_vulner_title: 'Vulnerable groups',
+    cc_vulner_hint: 'Select the "harmed" values that should count as vulnerable groups.',
+    cc_chrono_title: 'Harm types for chronology',
+    cc_chrono_hint: 'Choose 1–4 harm types to show their evolution over time.',
+    cc_reset: 'Reset', cc_apply: 'Apply',
   }},
 }};
 let currentLang = 'es';
@@ -545,6 +613,7 @@ function showTab(id, btn) {{
   if (id === 'analysis') {{
     renderAnalysisCards();
     initAnalysisFilters();
+    initChartConfig();
     renderMetricsCharts();
     renderDynamicCharts();
     initWcPanel();
@@ -574,7 +643,7 @@ function initEda() {{
     const cls   = col.col_type==='numeric' ? 'badge-num' : col.col_type==='list' ? 'badge-list' : 'badge-cat';
     const label = col.col_type==='numeric' ? t('numeric_lbl') : col.col_type==='list' ? t('multilabel_lbl') : t('categorical_lbl');
     return `<div class="col-card" onclick="showColDetail('${{esc(col.name)}}')" id="colcard-${{CSS.escape(col.name)}}">
-      <div class="col-card-name">${{col.name}}</div>
+      <div class="col-card-name">${{colLabel(col.name)}}</div>
       <span class="type-badge ${{cls}}">${{label}}</span>
       <div class="col-card-stats">
         <span>${{t('unique_lbl')}}: <b>${{col.unique_count}}</b></span>
@@ -584,8 +653,6 @@ function initEda() {{
     </div>`;
   }}).join('');
 
-  initScatterPanel();
-  initCrosstabPanel();
 }}
 
 function renderCompletenessChart() {{
@@ -595,7 +662,7 @@ function renderCompletenessChart() {{
   const colors = completeness.map(v => v >= 90 ? '#4ff7a6' : v >= 70 ? '#f7964f' : '#f74f6e');
   Plotly.newPlot('eda-completeness', [{{
     x: completeness,
-    y: sorted.map(c => trunc(c.name, 40)),
+    y: sorted.map(c => trunc(colLabel(c.name), 40)),
     type: 'bar', orientation: 'h',
     marker: {{ color: colors }},
     text: completeness.map(v => v + '%'),
@@ -615,7 +682,7 @@ function renderColSummaryTable() {{
   const typeLabel = tp => tp==='numeric' ? t('numeric_lbl') : tp==='list' ? t('multilabel_lbl') : t('categorical_lbl');
   const typeCls   = tp => tp==='numeric' ? 'badge-num' : tp==='list' ? 'badge-list' : 'badge-cat';
   const rows = cols.map(c => `<tr>
-    <td class="st-name">${{c.name}}</td>
+    <td class="st-name">${{colLabel(c.name)}}</td>
     <td><span class="type-badge ${{typeCls(c.col_type)}}">${{typeLabel(c.col_type)}}</span></td>
     <td class="st-num">${{EDA_STATS.n_rows.toLocaleString()}}</td>
     <td class="st-num">${{c.unique_count.toLocaleString()}}</td>
@@ -648,7 +715,7 @@ function showColDetail(colName) {{
   const detail = document.getElementById('col-detail');
   detail.classList.remove('hidden');
 
-  let statsHtml = `<h3 class="detail-title">${{col.name}}</h3><div class="detail-stats">`;
+  let statsHtml = `<h3 class="detail-title">${{colLabel(col.name)}}</h3><div class="detail-stats">`;
   statsHtml += dsRow(t('type_lbl'), col.col_type) + dsRow(t('unique_lbl'), col.unique_count.toLocaleString())
              + dsRow(t('nulls_lbl'), `${{col.null_count.toLocaleString()}} (${{col.null_pct}}%)`);
   if (col.col_type === 'numeric') {{
@@ -710,8 +777,8 @@ function renderColChart(colName, chartType, btn) {{
     DATA_RECORDS.forEach(r => {{
       const rg = r[regionCol]; if (!rg) return;
       const v  = r[colName];   if (v == null) return;
-      (Array.isArray(v) ? v : [v]).forEach(val => {{
-        const k = String(val);
+      _parseVal(v).forEach(val => {{
+        const k = String(val).trim(); if (!k || k === 'null') return;
         if (!counts[k]) counts[k] = {{}};
         counts[k][String(rg)] = (counts[k][String(rg)] || 0) + 1;
       }});
@@ -741,8 +808,8 @@ function renderColChart(colName, chartType, btn) {{
       const y = r[yearCol]; if (!y) return;
       years.add(y);
       const v = r[colName]; if (v == null) return;
-      (Array.isArray(v) ? v : [v]).forEach(val => {{
-        const k = String(val);
+      _parseVal(v).forEach(val => {{
+        const k = String(val).trim(); if (!k || k === 'null') return;
         if (!byCY[k]) byCY[k] = {{}};
         byCY[k][y] = (byCY[k][y]||0) + 1;
       }});
@@ -884,14 +951,20 @@ function renderCrosstab() {{
 let ANALYSIS_FILTERS = {{ yearMin: null, yearMax: null, regions: [] }};
 
 function initAnalysisFilters() {{
-  // Populate year inputs with dataset range as placeholder
-  const allYears = (METRICS.regional_evolution || []).map(r => +r.year).filter(Boolean);
-  if (allYears.length) {{
-    const minY = Math.min(...allYears), maxY = Math.max(...allYears);
-    const minEl = document.getElementById('af-year-min');
-    const maxEl = document.getElementById('af-year-max');
-    minEl.min = minY; minEl.max = maxY; minEl.placeholder = minY;
-    maxEl.min = minY; maxEl.max = maxY; maxEl.placeholder = maxY;
+  // Hide year filter entirely if dataset has no date column
+  const yearGroup = document.querySelector('.af-group:has(#af-year-min)');
+  if (!AVAIL_COLS.has(COL_ROLES.year)) {{
+    if (yearGroup) yearGroup.style.display = 'none';
+  }} else {{
+    if (yearGroup) yearGroup.style.display = '';
+    const allYears = (METRICS.regional_evolution || []).map(r => +r.year).filter(Boolean);
+    if (allYears.length) {{
+      const minY = Math.min(...allYears), maxY = Math.max(...allYears);
+      const minEl = document.getElementById('af-year-min');
+      const maxEl = document.getElementById('af-year-max');
+      minEl.min = minY; minEl.max = maxY; minEl.placeholder = minY;
+      maxEl.min = minY; maxEl.max = maxY; maxEl.placeholder = maxY;
+    }}
   }}
 
   // Populate region checkboxes (only once)
@@ -927,6 +1000,117 @@ function clearAnalysisFilters() {{
   ANALYSIS_FILTERS = {{ yearMin: null, yearMax: null, regions: [] }};
   document.getElementById('metrics-charts').dataset.rendered = '';
   renderMetricsCharts();
+}}
+
+/* ════════════════════════════════════════════════════════════════════════
+   CHART CONFIG — Vulnerable groups, harm chronology, severity mapping
+   ════════════════════════════════════════════════════════════════════════ */
+/* Derive unique values for harmed / harmtype / harmlevel from DATA_RECORDS */
+function _uniqueVals(col) {{
+  const seen = {{}};
+  DATA_RECORDS.forEach(r => {{
+    _parseVal(r[col]).forEach(v => {{
+      const s = String(v).trim();
+      if (s && s !== 'null') seen[s] = (seen[s] || 0) + 1;
+    }});
+  }});
+  return Object.entries(seen).sort((a,b)=>b[1]-a[1]).map(([k])=>k);
+}}
+
+/* Persistent state (localStorage so it survives refreshes) */
+const CC_KEY = 'chartConfig_v1';
+let CHART_CONFIG = null;
+
+function _defaultChartConfig() {{
+  const harmedVals  = _uniqueVals(COL_ROLES.harmed  || 'harmed');
+  const harmtypeVals= _uniqueVals(COL_ROLES.harm_type|| 'harmtype');
+  const harmlevelVals=_uniqueVals(COL_ROLES.harm_level||'harmlevel');
+  // Default vulnerable: pick top 5 that are plausibly "vulnerable" by name, else top 5
+  const vulnerKeywords = /child|minor|women|woman|elderly|migrant|refugee|patient|minority|disabl/i;
+  const defVulner = harmedVals.filter(v=>vulnerKeywords.test(v)).slice(0,8);
+  // Default chrono: first 3 harm types
+  const defChrono = harmtypeVals.slice(0,3);
+  return {{ vulnerGroups: defVulner, chronoTypes: defChrono }};
+}}
+
+function initChartConfig() {{
+  try {{
+    const saved = localStorage.getItem(CC_KEY);
+    if (saved) {{
+      const parsed = JSON.parse(saved);
+      // Merge: add any new harmlevel values not yet in saved map
+      const defaults = _defaultChartConfig();
+      CHART_CONFIG = {{ ...defaults, ...parsed }};
+    }} else {{
+      CHART_CONFIG = _defaultChartConfig();
+    }}
+  }} catch(e) {{
+    CHART_CONFIG = _defaultChartConfig();
+  }}
+}}
+
+function openChartConfig() {{
+  if (!CHART_CONFIG) initChartConfig();
+  const harmedCol    = COL_ROLES.harmed    || 'harmed';
+  const harmtypeCol  = COL_ROLES.harm_type || 'harmtype';
+  const harmlevelCol = COL_ROLES.harm_level|| 'harmlevel';
+  const hasHarmedCol    = AVAIL_COLS.has(harmedCol);
+  const hasHarmtypeCol  = AVAIL_COLS.has(harmtypeCol);
+  const hasHarmlevelCol = AVAIL_COLS.has(harmlevelCol);
+
+  // Vulnerable groups section — hide if harmed column absent
+  const vulnerSection = document.getElementById('cc-vulner-list').closest('.cc-section');
+  vulnerSection.style.display = hasHarmedCol ? '' : 'none';
+  if (hasHarmedCol) {{
+    const harmedVals = _uniqueVals(harmedCol);
+    document.getElementById('cc-vulner-list').innerHTML = harmedVals.map(v => {{
+      const checked = CHART_CONFIG.vulnerGroups.includes(v) ? 'checked' : '';
+      const cnt = DATA_RECORDS.filter(r=>_parseVal(r[harmedCol]).includes(v)).length;
+      return `<label class="cc-check-label"><input type="checkbox" value="${{v}}" ${{checked}}> ${{v}} <span class="cc-count">(${{cnt.toLocaleString()}})</span></label>`;
+    }}).join('');
+  }}
+
+  // Harm chronology section — hide if harm_type column absent
+  const chronoSection = document.getElementById('cc-chrono-list').closest('.cc-section');
+  chronoSection.style.display = hasHarmtypeCol ? '' : 'none';
+  if (hasHarmtypeCol) {{
+    const harmtypeVals = _uniqueVals(harmtypeCol);
+    document.getElementById('cc-chrono-list').innerHTML = harmtypeVals.map(v => {{
+      const checked = CHART_CONFIG.chronoTypes.includes(v) ? 'checked' : '';
+      const cnt = DATA_RECORDS.filter(r=>_parseVal(r[harmtypeCol]).includes(v)).length;
+      return `<label class="cc-check-label"><input type="checkbox" value="${{v}}" ${{checked}}> ${{v}} <span class="cc-count">(${{cnt.toLocaleString()}})</span></label>`;
+    }}).join('');
+  }}
+
+  // Hide the entire config button if nothing is configurable
+  if (!hasHarmedCol && !hasHarmtypeCol) {{
+    document.querySelector('.af-config-btn').style.display = 'none';
+    return;
+  }}
+  document.getElementById('chart-config-overlay').classList.remove('hidden');
+}}
+
+function closeChartConfig() {{
+  document.getElementById('chart-config-overlay').classList.add('hidden');
+}}
+
+function applyChartConfig() {{
+  // Read vulnerable groups
+  CHART_CONFIG.vulnerGroups = [...document.querySelectorAll('#cc-vulner-list input:checked')].map(el=>el.value);
+  // Read chrono types
+  CHART_CONFIG.chronoTypes  = [...document.querySelectorAll('#cc-chrono-list input:checked')].map(el=>el.value);
+  // Persist
+  try {{ localStorage.setItem(CC_KEY, JSON.stringify(CHART_CONFIG)); }} catch(e) {{}}
+  closeChartConfig();
+  // Re-render affected charts
+  document.getElementById('metrics-charts').dataset.rendered = '';
+  renderMetricsCharts();
+}}
+
+function resetChartConfig() {{
+  CHART_CONFIG = _defaultChartConfig();
+  try {{ localStorage.removeItem(CC_KEY); }} catch(e) {{}}
+  openChartConfig(); // re-open with defaults
 }}
 
 /* ── Filter helpers ─────────────────────────────────────────────────── */
@@ -986,18 +1170,48 @@ function renderMetricsCharts() {{
   if (grid.dataset.rendered === currentLang) return;
   grid.dataset.rendered = currentLang;
 
+  const hasYear      = AVAIL_COLS.has(COL_ROLES.year);
+  const hasRegion    = AVAIL_COLS.has(COL_ROLES.region);
+  const hasTags      = AVAIL_COLS.has(COL_ROLES.tags);
+  const hasHarmType  = AVAIL_COLS.has(COL_ROLES.harm_type);
+  const hasIndustries= AVAIL_COLS.has(COL_ROLES.industries);
+  const hasHarmed    = AVAIL_COLS.has(COL_ROLES.harmed);
+  const hasHarmLevel = AVAIL_COLS.has(COL_ROLES.harm_level);
+  const hasSentiment = AVAIL_COLS.has(COL_ROLES.sentiment_score);
   const specs = [
-    {{ id:'mc-revol',    title: t('chart_revol'),    fn: chartRegionalEvolution }},
-    {{ id:'mc-cumul',    title: t('chart_cumul'),    fn: chartCumulative }},
-    {{ id:'mc-harmtype', title: t('chart_harmtype'), fn: chartHarmTypes }},
-    {{ id:'mc-princip',  title: t('chart_princip'),  fn: chartPrinciples }},
-    {{ id:'mc-indust',   title: t('chart_indust'),   fn: chartIndustries }},
-    {{ id:'mc-harmed',   title: t('chart_harmed'),   fn: chartStakeholders }},
-    {{ id:'mc-vulner',   title: t('chart_vulner'),   fn: chartVulnerable }},
-    {{ id:'mc-chrono',   title: t('chart_chrono'),   fn: chartHarmChronology }},
-    {{ id:'mc-sev',      title: t('chart_sev'),      fn: chartSeverity }},
-    {{ id:'mc-mh',       title: t('chart_mh'),       fn: chartMentalHealth }},
-    {{ id:'mc-neg',      title: t('chart_neg'),      fn: chartNegativity }},
+    // Year + region charts
+    ...(hasYear && hasRegion ? [
+      {{ id:'mc-revol',  title: t('chart_revol'),  fn: chartRegionalEvolution }},
+      {{ id:'mc-cumul',  title: t('chart_cumul'),  fn: chartCumulative }},
+    ] : []),
+    // Harm type chart
+    ...(hasHarmType ? [
+      {{ id:'mc-harmtype', title: t('chart_harmtype'), fn: chartHarmTypes }},
+    ] : []),
+    // Tags / categories chart — shown whenever tags column exists
+    ...(hasTags ? [
+      {{ id:'mc-princip',  title: t('chart_princip'),  fn: chartPrinciples }},
+    ] : []),
+    // Industries chart
+    ...(hasIndustries ? [
+      {{ id:'mc-indust',   title: t('chart_indust'),   fn: chartIndustries }},
+    ] : []),
+    // Harmed / stakeholders charts
+    ...(hasHarmed ? [
+      {{ id:'mc-harmed',   title: t('chart_harmed'),   fn: chartStakeholders }},
+      {{ id:'mc-vulner',   title: t('chart_vulner'),   fn: chartVulnerable }},
+    ] : []),
+    // Year-dependent harm charts
+    ...(hasYear && hasHarmType ? [
+      {{ id:'mc-chrono', title: t('chart_chrono'),   fn: chartHarmChronology }},
+    ] : []),
+    ...(hasYear ? [
+      {{ id:'mc-mh',     title: t('chart_mh'),       fn: chartMentalHealth }},
+    ] : []),
+    ...(hasYear && hasSentiment && hasTags ? [
+      {{ id:'mc-neg',     title: t('chart_neg'),         fn: chartNegativity }},
+      {{ id:'mc-neg-yr',  title: t('chart_neg_yearly'),  fn: chartNegativityYearly }},
+    ] : []),
     {{ id:'mc-tok',      title: t('chart_tok'),      fn: chartTopTokens }},
   ];
 
@@ -1080,10 +1294,25 @@ function chartHarmTypes(id) {{
 function chartPrinciples(id) {{
   const raw = METRICS.principles_distribution || [];
   if (!raw.length) {{ noDom(id); return; }}
-  const rk = Object.keys(raw[0])[0];
+  const keys = Object.keys(raw[0]);
+  // Flat format: [{{tagCol: value, count: n}}] — returned when dataset has no region
+  if (keys.length === 2 && keys[1] === 'count') {{
+    const tagKey = keys[0];
+    const sorted = [...raw].sort((a,b) => (a.count||0) - (b.count||0));
+    Plotly.newPlot(id, [{{
+      x: sorted.map(r => r.count||0),
+      y: sorted.map(r => trunc(String(r[tagKey]),45)),
+      type:'bar', orientation:'h', marker:{{color:'#4f8ef7'}},
+      customdata: sorted.map(r => r[tagKey]),
+      hovertemplate: '%{{customdata}}: %{{x:,}}<extra></extra>'
+    }}], {{ ...BL(t('incidents'),''), margin:{{t:10,b:40,l:220,r:20}}, yaxis:{{automargin:true}} }}, PCFG);
+    return;
+  }}
+  // Pivot format: [{{region: val, tag1: n, tag2: n, ...}}]
+  const rk = keys[0];
   const rows = _afRegionRows(raw, rk);
   if (!rows.length) {{ noDom(id); return; }}
-  const ps = Object.keys(raw[0]).filter(k=>k!==rk);
+  const ps = keys.filter(k=>k!==rk);
   const sorted = ps.map(p=>[p, rows.reduce((s,r)=>s+(r[p]||0),0)]).sort((a,b)=>a[1]-b[1]);
   Plotly.newPlot(id, [{{
     x: sorted.map(([,v])=>v), y: sorted.map(([k])=>trunc(k,45)),
@@ -1129,21 +1358,52 @@ function chartStakeholders(id) {{
 }}
 
 function chartVulnerable(id) {{
-  const rows = [...(METRICS.vulnerable_groups_distribution||[])].sort((a,b)=>a.count-b.count);
-  if (!rows.length) {{ noDom(id); return; }}
+  if (!CHART_CONFIG) initChartConfig();
+  const harmedCol = COL_ROLES.harmed || 'harmed';
+  const yearCol   = COL_ROLES.year   || 'year';
+  const groups = CHART_CONFIG.vulnerGroups;
+  if (!groups.length) {{ noDom(id); return; }}
+  // Filter by analysis year/region filters
+  const allRows = DATA_RECORDS.filter(r => {{
+    const y = +r[yearCol];
+    if (ANALYSIS_FILTERS.yearMin != null && y < ANALYSIS_FILTERS.yearMin) return false;
+    if (ANALYSIS_FILTERS.yearMax != null && y > ANALYSIS_FILTERS.yearMax) return false;
+    if (ANALYSIS_FILTERS.regions.length) {{
+      const rg = String(r[COL_ROLES.region || 'geo_zone'] || '');
+      if (!ANALYSIS_FILTERS.regions.includes(rg)) return false;
+    }}
+    return true;
+  }});
+  const counts = groups.map(g => {{
+    return {{ group: g, count: allRows.filter(r => _parseVal(r[harmedCol]).includes(g)).length }};
+  }}).sort((a,b)=>a.count-b.count);
+  if (!counts.some(r=>r.count>0)) {{ noDom(id); return; }}
   Plotly.newPlot(id, [{{
-    x: rows.map(r=>r.count), y: rows.map(r=>String(r.group)),
+    x: counts.map(r=>r.count), y: counts.map(r=>String(r.group)),
     type:'bar', orientation:'h', marker:{{color:'#a64ff7'}},
     hovertemplate: '%{{y}}: %{{x:,}}<extra></extra>'
   }}], {{ ...BL(t('incidents'),''), margin:{{t:10,b:40,l:170,r:20}}, yaxis:{{automargin:true}} }}, PCFG);
 }}
 
 function chartHarmChronology(id) {{
-  const rows = _afYears(METRICS.harm_chronology || [], 'year');
-  if (!rows.length) {{ noDom(id); return; }}
-  const hts = Object.keys(METRICS.harm_chronology[0] || {{}}).filter(k=>k!=='year');
-  Plotly.newPlot(id, hts.map((ht,i)=>({{
-    x: rows.map(r=>r.year), y: rows.map(r=>r[ht]||0), name: trunc(ht,30),
+  if (!CHART_CONFIG) initChartConfig();
+  const htCol  = COL_ROLES.harm_type || 'harmtype';
+  const yearCol= COL_ROLES.year      || 'year';
+  const types  = CHART_CONFIG.chronoTypes;
+  if (!types.length) {{ noDom(id); return; }}
+  // Aggregate by year for each type
+  const yearMap = {{}};
+  DATA_RECORDS.forEach(r => {{
+    const y = +r[yearCol]; if (!y) return;
+    if (ANALYSIS_FILTERS.yearMin != null && y < ANALYSIS_FILTERS.yearMin) return;
+    if (ANALYSIS_FILTERS.yearMax != null && y > ANALYSIS_FILTERS.yearMax) return;
+    if (!yearMap[y]) {{ yearMap[y] = {{}}; types.forEach(tp => yearMap[y][tp] = 0); }}
+    _parseVal(r[htCol]).forEach(v => {{ if (yearMap[y][v] !== undefined) yearMap[y][v]++; }});
+  }});
+  const years = Object.keys(yearMap).map(Number).sort();
+  if (!years.length) {{ noDom(id); return; }}
+  Plotly.newPlot(id, types.map((ht,i)=>({{
+    x: years, y: years.map(y=>yearMap[y][ht]||0), name: trunc(ht,30),
     type:'scatter', mode:'lines+markers', line:{{color:C[i%C.length],width:2}}, marker:{{size:5}},
     hovertemplate: ht + '<br>' + t('year_lbl') + ': %{{x}}<br>' + t('incidents') + ': %{{y}}<extra></extra>'
   }})), {{
@@ -1151,19 +1411,7 @@ function chartHarmChronology(id) {{
     showlegend:true, legend:{{orientation:'h',y:-0.32,x:0.5,xanchor:'center',font:{{size:9}}}},
     margin:{{t:10,b:110,l:60,r:20}}
   }}, PCFG);
-  addLegendTooltips(id, hts);
-}}
-
-function chartSeverity(id) {{
-  const rows = _afYears(METRICS.harm_severity_index || [], 'year');
-  if (!rows.length) {{ noDom(id); return; }}
-  Plotly.newPlot(id, [{{
-    x: rows.map(r=>r.year), y: rows.map(r=>r.avg_severity),
-    type:'scatter', mode:'lines+markers',
-    line:{{color:'#f7964f',width:2}}, marker:{{size:6}},
-    fill:'tozeroy', fillcolor:'rgba(247,150,79,0.08)',
-    hovertemplate: t('year_lbl') + ': %{{x}}<br>' + t('severity_lbl') + ': %{{y:.2f}}<extra></extra>'
-  }}], {{ ...BL(t('year_lbl'),t('severity_lbl')), margin:{{t:10,b:40,l:80,r:20}} }}, PCFG);
+  addLegendTooltips(id, types);
 }}
 
 function chartMentalHealth(id) {{
@@ -1204,6 +1452,45 @@ function chartNegativity(id) {{
   addLegendTooltips(id, ps);
 }}
 
+function chartNegativityYearly(id) {{
+  const data = METRICS.negativity_by_principle_yearly || [];
+  if (!data.length) {{ noDom(id); return; }}
+  // Principle columns (exclude 'year' and '__ma3' rolling-average columns)
+  const ps = Object.keys(data[0]).filter(k => k !== 'year' && !k.includes('__ma'));
+  const years = data.map(r => String(r.year));
+  // Raw lines (thin) + 3-year rolling average (thick)
+  const traces = [];
+  ps.forEach((p, i) => {{
+    const color = C[i % C.length];
+    traces.push({{
+      x: years, y: data.map(r => r[p] ?? null),
+      name: trunc(p, 30), type: 'scatter', mode: 'lines+markers', connectgaps: false,
+      line: {{ color, width: 1, dash: 'dot' }}, marker: {{ color, size: 5 }},
+      legendgroup: p, showlegend: true,
+      hovertemplate: p + '<br>' + t('year_lbl') + ': %{{x}}<br>' + t('neg_score') + ': %{{y:.3f}}<extra></extra>'
+    }});
+    const maKey = p + '__ma3';
+    if (data[0][maKey] !== undefined) {{
+      traces.push({{
+        x: years, y: data.map(r => r[maKey] ?? null),
+        name: trunc(p, 30) + ' (MA3)', type: 'scatter', mode: 'lines', connectgaps: false,
+        line: {{ color, width: 2.5 }},
+        legendgroup: p, showlegend: false,
+        hovertemplate: p + ' MA3<br>' + t('year_lbl') + ': %{{x}}<br>' + t('neg_score') + ': %{{y:.3f}}<extra></extra>'
+      }});
+    }}
+  }});
+  Plotly.newPlot(id, traces, {{
+    ...BL(t('year_lbl'), t('neg_score')),
+    showlegend: true,
+    legend: {{ orientation: 'h', y: -0.35, x: 0.5, xanchor: 'center', font: {{ size: 9 }} }},
+    margin: {{ t: 10, b: 110, l: 70, r: 20 }},
+    yaxis: {{ range: [0, 1] }},
+    xaxis: {{ tickangle: -30 }}
+  }}, PCFG);
+  addLegendTooltips(id, ps);
+}}
+
 function chartTopTokens(id) {{
   const rows = [...(METRICS.top_tokens||[])].slice(0,20).sort((a,b)=>a.frequency-b.frequency);
   if (!rows.length) {{ noDom(id); return; }}
@@ -1215,148 +1502,78 @@ function chartTopTokens(id) {{
 }}
 
 /* ════════════════════════════════════════════════════════════════════════
-   WORDCLOUD — interactive, column-driven
+   WORDCLOUD — always uses NLP-lemmatized tokens (METRICS.wc_tokens)
    ════════════════════════════════════════════════════════════════════════ */
-/* Return true if column is text/list-of-strings — good for wordcloud */
-function _isTextCol(c) {{
-  if (c.startsWith('mlb_')) return false;
-  const samples = DATA_RECORDS.filter(r => r[c] != null).slice(0, 10);
-  if (!samples.length) return false;
-  const v = samples[0][c];
-  if (Array.isArray(v)) return v.length === 0 || typeof v[0] === 'string';
-  return typeof v === 'string';
-}}
 
-/* Return true if column is categorical — good for filter checkboxes.
-   Excludes mlb_* (one-hot), numeric/boolean, and free-text (avg len > 200). */
-function _isCatCol(c) {{
-  if (c.startsWith('mlb_')) return false;
-  const samples = DATA_RECORDS.filter(r => r[c] != null).slice(0, 20);
-  if (!samples.length) return false;
-  const v = samples[0][c];
-  if (Array.isArray(v)) return v.length === 0 || typeof v[0] === 'string';
-  if (typeof v !== 'string') return false;
-  // Exclude free-text: avg length > 200 chars (typical for description-type columns)
-  const avgLen = samples.reduce((s,r) => s + String(r[c]).length, 0) / samples.length;
-  return avgLen <= 200;
+/* Build a {{col: [val, val, ...]}} index from the pre-computed wc_tokens keys */
+function _wcIndex() {{
+  const wc = METRICS.wc_tokens || {{}};
+  const idx = {{}};
+  Object.keys(wc).forEach(k => {{
+    if (k === 'all') return;
+    const sep = k.indexOf('::');
+    if (sep < 0) return;
+    const col = k.slice(0, sep);
+    const val = k.slice(sep + 2);
+    if (!idx[col]) idx[col] = [];
+    idx[col].push(val);
+  }});
+  // Sort values within each column
+  Object.values(idx).forEach(arr => arr.sort((a, b) => a.localeCompare(b, undefined, {{numeric: true}})));
+  return idx;
 }}
 
 function initWcPanel() {{
-  if (document.getElementById('wc-col-select').options.length > 1) return;
-  const allCols = DATA_RECORDS.length ? Object.keys(DATA_RECORDS[0]) : [];
-  // Sort alphabetically by display label
-  const sortByLabel = arr => [...arr].sort((a,b) => colLabel(a).localeCompare(colLabel(b)));
-  const wcCols  = sortByLabel(allCols.filter(_isTextCol));   // wordcloud: any text/list
-  const catCols = sortByLabel(allCols.filter(_isCatCol));    // filter row: categorical only
-
-  // Store for search
-  window._wcAllCols  = wcCols;
-  window._wcCatCols  = catCols;
-
-  _buildWcColOptions(wcCols);
-
+  if (window._wcInitDone) return;
+  window._wcInitDone = true;
+  const idx = _wcIndex();
   const fltSel = document.getElementById('wc-filter-col');
-  catCols.forEach(c => {{
+  Object.keys(idx).sort((a, b) => colLabel(a).localeCompare(colLabel(b))).forEach(col => {{
     const o = document.createElement('option');
-    o.value = c; o.textContent = colLabel(c);
+    o.value = col;
+    o.textContent = colLabel(col);
     fltSel.appendChild(o);
   }});
-
-  // Default: try to select tokens column
-  const tokCol = COL_ROLES.tokens || 'tokens';
-  const colSel = document.getElementById('wc-col-select');
-  if (wcCols.includes(tokCol)) colSel.value = tokCol;
-  document.getElementById('wc-filter-wrap').classList.remove('hidden');
-}}
-
-function _buildWcColOptions(cols) {{
-  const colSel = document.getElementById('wc-col-select');
-  const cur = colSel.value;
-  colSel.innerHTML = `<option value="">${{t('select_col')}}</option>`;
-  cols.forEach(c => {{
-    const o = document.createElement('option');
-    o.value = c;
-    o.textContent = colLabel(c);   // show original CSV name (e.g. "description")
-    if (c === cur) o.selected = true;
-    colSel.appendChild(o);
-  }});
-}}
-
-function searchWcCol(q) {{
-  const cols = window._wcAllCols || [];
-  const filtered = q ? cols.filter(c => colLabel(c).toLowerCase().includes(q.toLowerCase())
-                                     || c.toLowerCase().includes(q.toLowerCase())) : cols;
-  _buildWcColOptions(filtered);
-}}
-
-function onWcColChange() {{
-  document.getElementById('wc-filter-wrap').classList.remove('hidden');
 }}
 
 function onWcFilterColChange() {{
   const col = document.getElementById('wc-filter-col').value;
   const container = document.getElementById('wc-filter-vals');
-  if (!col) {{ container.innerHTML = ''; return; }}
-  const vals = new Set();
-  DATA_RECORDS.forEach(r => {{
-    const v = r[col];
-    if (Array.isArray(v)) v.forEach(x=>{{ if(x!=null) vals.add(String(x)); }});
-    else if (v!=null) vals.add(String(v));
+  container.innerHTML = '';
+  if (!col) return;
+  const idx = _wcIndex();
+  (idx[col] || []).forEach(v => {{
+    container.innerHTML += `<label class="val-checkbox"><input type="checkbox" value="${{v.replace(/"/g,'&quot;')}}"> ${{trunc(v, 50)}}</label>`;
   }});
-  const sorted = [...vals].sort((a,b)=>a.localeCompare(b,undefined,{{numeric:true}}));
-  container.innerHTML = sorted.map(v =>
-    `<label class="val-checkbox"><input type="checkbox" value="${{v.replace(/"/g,'&quot;')}}"> ${{trunc(v,50)}}</label>`
-  ).join('');
 }}
 
 function generateWordcloud() {{
-  const col = document.getElementById('wc-col-select').value;
-  if (!col) return;
+  const wc = METRICS.wc_tokens || {{}};
+  const fCol = document.getElementById('wc-filter-col').value;
+  const fVals = [...document.querySelectorAll('#wc-filter-vals input:checked')].map(i => i.value);
 
-  // Row filter from wc-filter-col + checked values
-  const fCol    = document.getElementById('wc-filter-col').value;
-  const fVals   = [...document.querySelectorAll('#wc-filter-vals input:checked')].map(i=>i.value);
-  let rows = DATA_RECORDS;
+  // Pick frequency dict: filtered or all
+  let counts = {{}};
   if (fCol && fVals.length) {{
-    rows = rows.filter(r => {{
-      const v = r[fCol];
-      if (Array.isArray(v)) return fVals.some(fv=>v.includes(fv));
-      return fVals.includes(String(v??''));
+    // Sum frequencies across selected values
+    fVals.forEach(v => {{
+      const key = fCol + '::' + v;
+      const src = wc[key] || {{}};
+      Object.entries(src).forEach(([w, n]) => {{ counts[w] = (counts[w] || 0) + n; }});
     }});
+  }} else {{
+    counts = Object.assign({{}}, wc['all'] || {{}});
   }}
 
-  // Detect column type: list (already tokenized) or raw text (need to split)
-  const firstVal = rows.find(r => r[col] != null)?.[col];
-  const isListCol = Array.isArray(firstVal);
-
-  // Build word frequencies
-  const counts = {{}};
-  // Basic stopwords for raw-text mode
-  const STOP = new Set(['the','a','an','in','of','to','and','is','was','for','on','with',
-    'that','it','at','by','from','as','be','are','were','has','had','have','this',
-    'but','or','not','its','their','been','they','he','she','his','her','also','more']);
-  rows.forEach(r => {{
-    const v = r[col]; if (v==null) return;
-    let words;
-    if (isListCol) {{
-      words = (Array.isArray(v) ? v : [v]).map(x => String(x).trim()).filter(Boolean);
-    }} else {{
-      // Raw text: lowercase, remove punctuation, split, filter short and stopwords
-      words = String(v).toLowerCase()
-        .replace(/[^a-z0-9\s]/g, ' ')
-        .split(/\s+/)
-        .filter(w => w.length > 2 && !STOP.has(w));
-    }}
-    words.forEach(w => {{ if(w) counts[w] = (counts[w]||0)+1; }});
-  }});
-
-  const list = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,120);
-  if (!list.length) {{ document.getElementById('wc-placeholder').textContent = t('no_data'); return; }}
+  const list = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 150);
+  if (!list.length) {{
+    document.getElementById('wc-placeholder').style.display = 'block';
+    document.getElementById('wc-placeholder').textContent = t('no_data');
+    return;
+  }}
 
   const canvas = document.getElementById('wc-canvas');
   document.getElementById('wc-placeholder').style.display = 'none';
-
-  // Clear canvas
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -1366,7 +1583,7 @@ function generateWordcloud() {{
     gridSize: Math.max(4, Math.round(canvas.width / 60)),
     weightFactor: size => Math.max(10, (size / maxFreq) * 72),
     fontFamily: 'system-ui, sans-serif',
-    color: () => C[Math.floor(Math.random()*C.length)],
+    color: () => C[Math.floor(Math.random() * C.length)],
     backgroundColor: '#ffffff',
     rotateRatio: 0.3,
     shuffle: true,
@@ -1527,7 +1744,8 @@ function renderDynamicCharts() {{
   const grid = document.getElementById('dynamic-charts');
   const specs = [];
   // Each spec title auto-generated from column name, not hardcoded
-  if (COL_ROLES.year) {{
+  // Only include charts for columns that actually exist in the dataset (AVAIL_COLS)
+  if (AVAIL_COLS.has(COL_ROLES.year) && AVAIL_COLS.has(COL_ROLES.region)) {{
     specs.push({{ id:'dc-year', title: prettyCol(COL_ROLES.year) + ' × ' + prettyCol(COL_ROLES.region||''), type:'year_region' }});
   }}
   const barCols = [
@@ -1535,9 +1753,12 @@ function renderDynamicCharts() {{
     ['harmed','harmed'], ['tags','tags']
   ];
   barCols.forEach(([role]) => {{
-    if (COL_ROLES[role]) specs.push({{ id:'dc-'+role, title: prettyCol(COL_ROLES[role]), type:'bar_count', col:COL_ROLES[role], topN:15 }});
+    const colName = COL_ROLES[role];
+    if (colName && AVAIL_COLS.has(colName)) {{
+      specs.push({{ id:'dc-'+role, title: prettyCol(colName), type:'bar_count', col:colName, topN:15 }});
+    }}
   }});
-  if (COL_ROLES.sentiment_score) {{
+  if (COL_ROLES.sentiment_score && AVAIL_COLS.has(COL_ROLES.sentiment_score)) {{
     specs.push({{ id:'dc-sent', title: prettyCol(COL_ROLES.sentiment_score), type:'hist', col:COL_ROLES.sentiment_score }});
   }}
 
@@ -1596,7 +1817,7 @@ function countBy(rows, col, topN) {{
   const counts = {{}};
   rows.forEach(r => {{
     const v=r[col]; if(v==null) return;
-    (Array.isArray(v)?v:[v]).forEach(x=>{{ if(x!=null) counts[String(x)]=(counts[String(x)]||0)+1; }});
+    _parseVal(v).forEach(x=>{{ if(x!=null && String(x).trim()) counts[String(x).trim()]=(counts[String(x).trim()]||0)+1; }});
   }});
   const sorted = Object.entries(counts).sort((a,b)=>b[1]-a[1]);
   return topN ? sorted.slice(0,topN) : sorted;
@@ -1659,6 +1880,27 @@ function syncChartTitle(el) {{
 /* ─── UI/layout helpers ─────────────────────────────────────────────── */
 const C = ['#4f8ef7','#f7964f','#4fbcf7','#f74f6e','#a64ff7','#4ff7a6',
            '#f7e54f','#4f6ef7','#f74fc4','#7af74f','#f7af4f','#4ff7e5'];
+
+/* ── Parse a value that may be a Python-style string list ───────────── */
+/* Converts "['a', 'b']" → ['a','b'].  Handles real arrays unchanged.  */
+function _parseVal(v) {{
+  if (Array.isArray(v)) return v;
+  if (v == null) return [];
+  const s = String(v).trim();
+  if (s === '' || s === '[]') return [];
+  if (s.startsWith('[')) {{
+    // Extract content between single or double quotes
+    const matches = s.match(/['"]([^'"]*)['"]/g);
+    if (matches && matches.length) {{
+      return matches.map(m => m.slice(1, -1).trim()).filter(Boolean);
+    }}
+    // Fallback: strip brackets and split by comma
+    const inner = s.slice(1, -1).trim();
+    if (!inner) return [];
+    return inner.split(',').map(x => x.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+  }}
+  return [s];
+}}
 
 /* Compute horizontal-legend layout (items below chart) with NO gap.
    n      = number of legend items
@@ -1723,6 +1965,7 @@ header{background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#fff;pad
 section{margin-bottom:34px}
 .section-title{font-size:1.05rem;font-weight:700;margin-bottom:5px;color:#16213e}
 .hint{font-size:.83rem;color:#888;margin-bottom:12px}
+.multilabel-note{background:#f0f4ff;border-left:3px solid #7b9ef7;border-radius:6px;padding:10px 14px;color:#3a4a6b;font-size:.82rem;margin-bottom:16px}
 
 .overview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:14px;margin-bottom:26px}
 .stat-card{background:#fff;border-radius:12px;padding:17px 15px;box-shadow:0 1px 6px rgba(0,0,0,.07);display:flex;flex-direction:column;align-items:center;text-align:center;gap:4px}
@@ -1770,6 +2013,29 @@ section{margin-bottom:34px}
 .af-check-label input{cursor:pointer;accent-color:#4f8ef7}
 .af-clear-btn{align-self:flex-end;padding:6px 14px;background:#fff;border:1.5px solid #d0d5e8;border-radius:20px;font-size:.78rem;color:#666;cursor:pointer;transition:all .15s;white-space:nowrap}
 .af-clear-btn:hover{border-color:#f74f6e;color:#f74f6e}
+.af-config-btn{border-color:#a64ff7!important;color:#a64ff7!important}
+.af-config-btn:hover{background:#a64ff7!important;color:#fff!important;border-color:#a64ff7!important}
+/* Chart config modal */
+.cc-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9000;display:flex;align-items:center;justify-content:center}
+.cc-overlay.hidden{display:none}
+.cc-modal{background:#fff;border-radius:14px;width:min(600px,95vw);max-height:88vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.22)}
+.cc-header{display:flex;justify-content:space-between;align-items:center;padding:16px 22px;border-bottom:1px solid #eee}
+.cc-title{font-size:.95rem;font-weight:700;color:#2d3748}
+.cc-close{background:none;border:none;font-size:1.1rem;cursor:pointer;color:#999;padding:4px 8px;border-radius:6px;line-height:1}
+.cc-close:hover{background:#f5f5f5;color:#333}
+.cc-body{flex:1;overflow-y:auto;padding:18px 22px;display:flex;flex-direction:column;gap:20px}
+.cc-section{{}}
+.cc-section-title{font-size:.82rem;font-weight:700;color:#4a5568;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
+.cc-hint{font-size:.78rem;color:#888;margin:0 0 10px}
+.cc-checklist{display:flex;flex-wrap:wrap;gap:5px 14px;max-height:130px;overflow-y:auto;padding:8px;background:#f8f9fc;border-radius:8px;border:1px solid #e8ebf5}
+.cc-check-label{display:flex;align-items:center;gap:4px;font-size:.8rem;color:#2d3748;cursor:pointer;white-space:nowrap}
+.cc-check-label input{{cursor:pointer;accent-color:#a64ff7}}
+.cc-count{color:#aaa;font-size:.72rem}
+.cc-footer{display:flex;justify-content:flex-end;gap:10px;padding:14px 22px;border-top:1px solid #eee}
+.cc-btn-primary{background:#a64ff7;color:#fff;border:none;border-radius:8px;padding:8px 20px;font-size:.85rem;font-weight:600;cursor:pointer}
+.cc-btn-primary:hover{{background:#8b35e8}}
+.cc-btn-secondary{background:#fff;color:#666;border:1.5px solid #d0d5e8;border-radius:8px;padding:8px 16px;font-size:.85rem;cursor:pointer}
+.cc-btn-secondary:hover{{border-color:#a64ff7;color:#a64ff7}}
 .chart-card{background:#fff;border-radius:12px;padding:15px 17px;box-shadow:0 1px 6px rgba(0,0,0,.07)}
 .chart-card-tall{grid-column:span 2}
 .chart-title{font-size:.88rem;font-weight:600;color:#444;margin-bottom:9px}

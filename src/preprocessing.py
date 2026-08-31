@@ -29,7 +29,10 @@ def preprocess(df: pd.DataFrame, config: dict) -> pd.DataFrame:
         column, and one-hot multi-label columns prefixed with ``mlb_``.
     """
     df = parse_list_columns(df, config["data"]["multilabel_columns"])
-    df = standardize_dates(df, config)
+    if "event_date" in df.columns:
+        df = standardize_dates(df, config)
+    else:
+        logger.info("No event_date column — skipping date standardization and year filtering")
     df = filter_regions(df, config)
     df = impute_text_fields(df, ["text_data"])
     df = recategorize_harm(df, config)
@@ -196,6 +199,10 @@ def recategorize_harm(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     harm_col = config["analysis"]["columns"]["harm_type"]
     aggregations = config["analysis"].get("harm_aggregations", {})
 
+    if harm_col not in df.columns:
+        logger.info("harm_type column '%s' not found — skipping recategorization", harm_col)
+        return df
+
     reverse_map = {}
     for category, members in aggregations.items():
         for member in members:
@@ -230,8 +237,18 @@ def explode_for_descriptive(df: pd.DataFrame, column: str) -> pd.DataFrame:
     if column not in df.columns:
         raise KeyError(f"Column '{column}' not found for explode")
 
+    df = df.copy()
+    # Auto-parse columns that still contain string representations of lists
+    # (e.g. "['Psychological', 'Reputational']") so that each element becomes
+    # its own row.  This covers multilabel columns not listed in
+    # multilabel_columns in the config.
+    sample = df[column].dropna().head(10)
+    if any(isinstance(v, str) and v.strip().startswith("[") for v in sample):
+        df[column] = df[column].apply(_safe_literal_eval)
+
     exploded = df.explode(column)
     exploded = exploded[exploded[column].notna()]
+    exploded = exploded[exploded[column].astype(str).str.strip().ne("")]
     return exploded
 
 

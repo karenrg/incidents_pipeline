@@ -17,26 +17,25 @@ data:
   # Mapeo de columnas: qué columna de tu CSV cumple cada rol en el análisis.
   # - Lado izquierdo: rol interno del pipeline (no cambiar)
   # - Lado derecho: nombre exacto de la columna en tu CSV
-  #
-  # Solo text_data y event_date son estrictamente necesarios.
-  # El resto se puede dejar vacío ("") si tu dataset no lo tiene.
   column_mapping:
-    text_data:   "summary"      # Texto principal del incidente (requerido)
-    event_date:  "date"         # Fecha del incidente (requerido)
-    geo_zone:    "region"       # Región geográfica (opcional)
-    tags_list:   "principles"   # Categorías o etiquetas (opcional)
-    harmtype:    "harmtype"     # Tipo de daño (opcional)
-    industries:  "industries"   # Industria o sector (opcional)
-    harmed:      "harmed"       # Grupos afectados (opcional)
-    harmlevel:   "harmlevel"    # Nivel de gravedad (opcional)
+    text_data:   "summary"             # Texto principal del incidente (requerido)
+    event_date:  "date"                # Fecha del incidente
+    geo_zone:    "region"             # Región geográfica
+    tags_list:   "principles"         # Principios OCDE de IA
+    harmtype:    "harmtype"           # Tipo de daño
+    industries:  "industries"         # Sector de despliegue
+    harmed:      "harmed"             # Grupos afectados
+    harmlevel:   "harmlevel"          # Nivel de gravedad
 
   # Columnas que contienen listas de valores (ej: '["sector1", "sector2"]').
-  # Dejá vacío si ninguna columna tiene este formato.
   multilabel_columns:
+    - "principles"
     - "industries"
+    - "harmed"
+    - "harmtype"
 
   # Dónde guardar el dataset procesado (se crea automáticamente)
-  processed_path: "data/processed/incidents_processed.parquet"
+  processed_path: "data/processed/oecd_aim_processed.parquet"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -44,43 +43,36 @@ data:
 # ─────────────────────────────────────────────────────────────────────────────
 
 filters:
-  # Rango de años a incluir en el análisis. null = sin límite.
-  year_range: []
-  # Regiones a incluir. Lista vacía [] = todas las regiones.
-  regions: []
+  # Rango de años a incluir. Replicamos el scope del paper y la tesis.
+  year_range: [2014, 2023]
+  # Regiones a incluir (vacío [] = todas).
+  regions:
+    - "North America"
+    - "Europe"
+    - "Asia"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ANÁLISIS DE SENTIMIENTO — Desactivado por defecto
 # ─────────────────────────────────────────────────────────────────────────────
-# El sentimiento clasifica el texto de cada incidente como negativo alto/medio/bajo.
-# Requiere tiempo de cómputo extra. Activalo solo si lo necesitás.
 
 sentiment:
-  enabled: true   # Cambiá a true para activar el análisis de sentimiento
+  enabled: false
 
-  # Modelo a usar. Elegí uno:
-  #   "openai"      → GPT-4o-mini de OpenAI (necesita API key, más preciso)
-  #   "transformer" → Modelo de HuggingFace (no necesita API key, ~500 MB de descarga)
   backend: "transformer"
 
-  # Solo necesario si backend = "openai"
   openai_model:   "gpt-4o-mini"
-  openai_api_key: ""   # Pegá tu key aquí para uso local. NO subas esto a git.
-                       # Alternativa más segura: exportar como variable de entorno
-                       # export OPENAI_API_KEY="sk-proj-..."
+  openai_api_key: ""
 
-  # Solo necesario si backend = "transformer"
   model_name:  "cardiffnlp/twitter-roberta-base-sentiment-latest"
   batch_size:  32
 
-  # Umbrales de clasificación (score de negatividad entre 0 y 1)
   thresholds:
-    high:   0.7   # >= 0.7 → "Alta"
-    medium: 0.4   # >= 0.4 → "Media", < 0.4 → "Baja"
+    high:   0.7
+    medium: 0.4
 
   evaluation:
-    enabled: false   # true = comparar contra etiquetas manuales (uso avanzado)
+    enabled: false
     human_label_column: "human_label"
 
 
@@ -89,10 +81,9 @@ sentiment:
 # ─────────────────────────────────────────────────────────────────────────────
 
 nlp:
-  language: "english"      # Idioma del texto ("english" o "spanish")
-  min_token_length: 3      # Ignorar palabras de menos de N caracteres
+  language: "english"
+  min_token_length: 3
 
-  # Palabras a ignorar además de las stopwords estándar
   custom_stopwords:
     - "ai"
     - "u"
@@ -102,22 +93,31 @@ nlp:
     - "say"
     - "use"
     - "would"
+    - "also"
+    - "one"
+    - "year"
+    - "could"
+    - "make"
+    - "said"
+    - "according"
 
-  # Normalización: reemplazar variantes de una misma palabra por su forma canónica
   normalization_map:
     deepfakes: "deepfake"
     chatbots:  "chatbot"
     warns:     "warn"
     using:     "use"
     used:      "use"
+    worker:    "worker"
+    workers:   "worker"
 
-  # Palabras clave para detectar incidentes relacionados con salud mental
   mental_health_keywords:
     - "mental health"
     - "stress"
     - "anxiety"
     - "depression"
     - "psychological"
+    - "suicide"
+    - "self-harm"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -125,7 +125,6 @@ nlp:
 # ─────────────────────────────────────────────────────────────────────────────
 
 analysis:
-  # Nombres de columna internos del pipeline (generados automáticamente, no cambiar)
   columns:
     region:             "geo_zone"
     year:               "year"
@@ -139,41 +138,34 @@ analysis:
     mental_health_flag: "mental_health_flag"
     tokens:             "tokens"
 
-  # Valores a excluir de los gráficos (celdas vacías, desconocidos)
   exclude_values: ["Unknown", "unclear", ""]
 
-  # Grupos vulnerables a destacar en el análisis
   vulnerable_groups:
-    - "Minors"
+    - "Children"
     - "Women"
-    - "Women, Minority Groups"
-    - "Black People"
-    - "Patients"
+    - "Minorities"
+    - "Workers"
 
-  # Cuántos items mostrar en los rankings
-  top_n_principles: 6
+  top_n_principles: 7
   top_n_industries: 10
   top_n_harmed:     10
 
-  # Ventanas para la media móvil (en meses)
   moving_average_windows: [3, 6, 12]
 
-  # Tipos de daño que se grafican en la cronología
+  # Tipos de daño con tendencia creciente (Figura 11 del paper)
   harm_chronology_types:
-    - "Lack of capability or robustness"
-    - "Unfair discrimination and misrepresentation"
+    - "Psychological"
+    - "Physical"
+    - "Human rights"
 
-  # Agrupaciones opcionales de tipos de daño
-  harm_aggregations:
-    Health: ["Physical", "Psychological"]
+  harm_aggregations: {}
 
-  # Escala de severidad para el índice de daño
   harm_level_severity:
-    "none":                        0
-    "AI tangible harm near-miss":  1
-    "AI tangible harm issue":      2
-    "AI tangible harm event":      3
-
+    "none":                       0
+    "unclear":                    0
+    "AI tangible harm issue":     1
+    "AI tangible harm near-miss": 2
+    "AI tangible harm event":     3
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -181,12 +173,12 @@ analysis:
 # ─────────────────────────────────────────────────────────────────────────────
 
 reporting:
-  report_title:       "Análisis de Incidentes de IA"
-  data_source_label:  "AI Incident Database (OECD)"
-  reports_dir:        "outputs/reports"   # Dónde guardar el HTML y el JSON de métricas
+  report_title:       "Análisis de Incidentes de IA — OECD AIM"
+  data_source_label:  "OECD AI Incidents Monitor (AIM)"
+  reports_dir:        "outputs/reports"
 
   html_report:
-    filter_columns:       []       # Vacío = todas las columnas disponibles
-    range_filter_columns: ["year"] # Columnas numéricas con slider de rango
+    filter_columns:       []
+    range_filter_columns: ["year"]
 
 random_state: 42

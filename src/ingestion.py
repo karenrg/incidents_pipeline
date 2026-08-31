@@ -9,7 +9,8 @@ logger = logging.getLogger(__name__)
 
 # Canonical column names produced by `load_and_validate` after applying the
 # YAML-driven `column_mapping`.
-INTERNAL_SCHEMA_COLUMNS = ["text_data", "event_date", "geo_zone", "tags_list"]
+# Only text_data is truly required; the rest are optional.
+INTERNAL_SCHEMA_COLUMNS = ["text_data", "geo_zone", "tags_list"]
 
 # Encodings attempted (in order) when reading the source CSV.
 _CANDIDATE_ENCODINGS = ["utf-8", "utf-8-sig", "latin-1"]
@@ -65,17 +66,55 @@ def _read_csv_robust(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Source data file not found: {path}")
 
-    last_error: UnicodeDecodeError | None = None
+    last_error: Exception | None = None
     for encoding in _CANDIDATE_ENCODINGS:
+        # Attempt 1: strict parsing
         try:
             df = pd.read_csv(path, encoding=encoding, sep=None, engine="python")
+            df = _clean_column_names(df)
             logger.info("Loaded %s rows from %s (encoding=%s)", len(df), path, encoding)
             return df
         except UnicodeDecodeError as error:
             last_error = error
             continue
+        except Exception as error:
+            last_error = error
+
+        # Attempt 2: permissive — ignore bad quoting (common in news/social datasets)
+        try:
+            import csv
+            df = pd.read_csv(
+                path,
+                encoding=encoding,
+                sep=None,
+                engine="python",
+                quoting=csv.QUOTE_NONE,
+                on_bad_lines="skip",
+            )
+            df = _clean_column_names(df)
+            logger.warning(
+                "Loaded %s rows from %s with permissive quoting (some lines may have been skipped)",
+                len(df), path,
+            )
+            return df
+        except UnicodeDecodeError:
+            continue
+        except Exception as error:
+            last_error = error
 
     raise last_error
+
+
+def _clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Strip whitespace, semicolons, and carriage returns from column names and string values."""
+    df.columns = [c.strip().rstrip(";").strip() for c in df.columns]
+    # Also clean trailing semicolons from string values in every column
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].apply(
+                lambda v: v.strip().rstrip(";").strip() if isinstance(v, str) else v
+            )
+    return df
 
 
 def _apply_column_mapping(df: pd.DataFrame, column_mapping: dict) -> pd.DataFrame:
@@ -95,6 +134,10 @@ def _apply_column_mapping(df: pd.DataFrame, column_mapping: dict) -> pd.DataFram
     """
     rename_map = {}
     for internal_name, source_name in column_mapping.items():
+        if not source_name:
+            # Empty string in mapping → column not available in this dataset, skip
+            logger.info("No source column mapped for '%s' — will be absent from pipeline", internal_name)
+            continue
         if source_name not in df.columns:
             raise KeyError(
                 f"Column mapping error: source column '{source_name}' "
